@@ -156,6 +156,95 @@ pub fn set_min_deposit(env: &Env, min: i128) -> Result<(), Error> {
     Ok(())
 }
 
+/// The penalty charged on an early locked withdrawal, in basis points
+/// (1/100 of a percent). Defaults to `0` (no penalty) before
+/// `set_early_withdraw_penalty_bps` has ever been called.
+pub fn early_withdraw_penalty_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::EarlyWithdrawPenaltyBps)
+        .unwrap_or(0)
+}
+
+/// Set the early-withdrawal penalty. Admin-only. `0` disables the penalty.
+///
+/// - Requires `require_auth` from the current admin.
+/// - Errors `InvalidParameters` if `bps > 10_000` (a penalty above 100%).
+/// - Takes effect immediately: the very next `locked_early_withdraw` is
+///   charged the new rate.
+pub fn set_early_withdraw_penalty_bps(env: &Env, bps: u32) -> Result<(), Error> {
+    extend_instance_ttl(env);
+
+    let admin = storage::get_admin(env).ok_or(Error::NotInitialized)?;
+    admin.require_auth();
+
+    if bps > 10_000 {
+        return Err(Error::InvalidParameters);
+    }
+
+    env.storage()
+        .instance()
+        .set(&DataKey::EarlyWithdrawPenaltyBps, &bps);
+
+    Ok(())
+}
+
+/// The address that receives early-withdrawal penalties. Defaults to the
+/// current admin when unset.
+///
+/// Errors `NotInitialized` if neither a recipient nor an admin is set.
+pub fn penalty_recipient(env: &Env) -> Result<Address, Error> {
+    if let Some(recipient) = env.storage().instance().get(&DataKey::PenaltyRecipient) {
+        return Ok(recipient);
+    }
+    storage::get_admin(env).ok_or(Error::NotInitialized)
+}
+
+/// Set the address that receives early-withdrawal penalties. Admin-only.
+///
+/// - Requires `require_auth` from the current admin.
+pub fn set_penalty_recipient(env: &Env, recipient: Address) -> Result<(), Error> {
+    extend_instance_ttl(env);
+
+    let admin = storage::get_admin(env).ok_or(Error::NotInitialized)?;
+    admin.require_auth();
+
+    env.storage()
+        .instance()
+        .set(&DataKey::PenaltyRecipient, &recipient);
+
+    Ok(())
+}
+
+/// The minimum time, in seconds, a locked plan must have been locked before a
+/// penalized early withdrawal is allowed. Defaults to `0` (no minimum)
+/// before `set_min_lock_period` has ever been called.
+pub fn min_lock_period(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MinLockPeriod)
+        .unwrap_or(0)
+}
+
+/// Set the minimum lock period for early withdrawal. Admin-only. `0`
+/// disables the minimum.
+///
+/// - Requires `require_auth` from the current admin.
+/// - Takes effect immediately: the very next `locked_early_withdraw` is
+///   checked against the new value.
+pub fn set_min_lock_period(env: &Env, seconds: u64) -> Result<(), Error> {
+    extend_instance_ttl(env);
+
+    let admin = storage::get_admin(env).ok_or(Error::NotInitialized)?;
+    admin.require_auth();
+
+    env.storage()
+        .instance()
+        .set(&DataKey::MinLockPeriod, &seconds);
+
+    Ok(())
+}
+
 /// Upgrade the contract's executable to `new_wasm_hash`. Admin-only.
 ///
 /// - Requires `require_auth` from the current admin.

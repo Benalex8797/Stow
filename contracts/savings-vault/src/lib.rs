@@ -9,6 +9,8 @@
 //! - [`goal`]     — save toward a target with milestones
 //! - [`group`]    — shared pools with enforced payouts
 //! - [`group_split`] — pools settled back to members by agreed shares
+//! - [`voting`]   — members vote to spend a group's pool
+//! - [`interest`] — balances that grow by compound interest
 //!
 //! This is a **skeleton**: every entrypoint is stubbed with `unimplemented!()`
 //! and a `TODO(issue)` describing the work. Each stub is one contributor issue.
@@ -20,9 +22,11 @@ mod flexible;
 mod goal;
 mod group;
 mod group_split;
+mod interest;
 mod locked;
 mod storage;
 mod types;
+mod voting;
 
 #[cfg(test)]
 mod test;
@@ -30,7 +34,9 @@ mod test;
 use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Map, String};
 
 use crate::error::Error;
-use crate::types::{FlexibleAccount, Goal, Group, LockedPlan};
+use crate::types::{
+    CompoundFrequency, FlexibleAccount, Goal, Group, InterestAccount, LockedPlan, Proposal,
+};
 
 #[contract]
 pub struct SavingsVault;
@@ -84,6 +90,40 @@ impl SavingsVault {
         admin::set_min_deposit(&env, min)
     }
 
+    /// The early-withdrawal penalty, in basis points. `0` means no penalty.
+    pub fn early_withdraw_penalty_bps(env: Env) -> u32 {
+        admin::early_withdraw_penalty_bps(&env)
+    }
+
+    /// Set the early-withdrawal penalty, in basis points. Admin-only; `0`
+    /// disables it. Errors `InvalidParameters` above `10_000`.
+    pub fn set_early_withdraw_penalty_bps(env: Env, bps: u32) -> Result<(), Error> {
+        admin::set_early_withdraw_penalty_bps(&env, bps)
+    }
+
+    /// The address that receives early-withdrawal penalties (the admin by
+    /// default).
+    pub fn penalty_recipient(env: Env) -> Result<Address, Error> {
+        admin::penalty_recipient(&env)
+    }
+
+    /// Set the address that receives early-withdrawal penalties. Admin-only.
+    pub fn set_penalty_recipient(env: Env, recipient: Address) -> Result<(), Error> {
+        admin::set_penalty_recipient(&env, recipient)
+    }
+
+    /// The minimum time a plan must be locked before early withdrawal, in
+    /// seconds. `0` means no minimum.
+    pub fn min_lock_period(env: Env) -> u64 {
+        admin::min_lock_period(&env)
+    }
+
+    /// Set the minimum lock period for early withdrawal, in seconds.
+    /// Admin-only; `0` disables it.
+    pub fn set_min_lock_period(env: Env, seconds: u64) -> Result<(), Error> {
+        admin::set_min_lock_period(&env, seconds)
+    }
+
     /// Upgrade the contract's Wasm executable to `new_wasm_hash`. Admin-only.
     /// See `admin::upgrade` for the trust trade-off this implies.
     pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) -> Result<(), Error> {
@@ -116,6 +156,17 @@ impl SavingsVault {
         locked::withdraw(&env, owner, plan_id, amount)
     }
 
+    /// Withdraw part of a still-locked plan early, paying an admin-configured
+    /// penalty on the withdrawn amount. See `locked::early_withdraw`.
+    pub fn locked_early_withdraw(
+        env: Env,
+        owner: Address,
+        plan_id: u64,
+        amount: i128,
+    ) -> Result<(), Error> {
+        locked::early_withdraw(&env, owner, plan_id, amount)
+    }
+
     pub fn locked_plan(env: Env, plan_id: u64) -> Result<LockedPlan, Error> {
         locked::get_plan(&env, plan_id)
     }
@@ -131,6 +182,17 @@ impl SavingsVault {
 
     pub fn goal_claim(env: Env, owner: Address, goal_id: u64) -> Result<(), Error> {
         goal::claim(&env, owner, goal_id)
+    }
+
+    /// Enable or disable automatic renewal for a goal. Owner-only. When
+    /// enabled, `goal_claim` restarts the goal instead of closing it.
+    pub fn goal_set_auto_renew(
+        env: Env,
+        owner: Address,
+        goal_id: u64,
+        auto_renew: bool,
+    ) -> Result<(), Error> {
+        goal::set_auto_renew(&env, owner, goal_id, auto_renew)
     }
 
     pub fn goal(env: Env, goal_id: u64) -> Result<Goal, Error> {
@@ -169,5 +231,104 @@ impl SavingsVault {
 
     pub fn group_settle(env: Env, caller: Address, group_id: u64) -> Result<(), Error> {
         group_split::settle(&env, caller, group_id)
+    }
+
+    // --- group voting ------------------------------------------------------
+    /// Set the voting window for spending proposals, in seconds. Creator-only;
+    /// `0` disables proposals for the group.
+    pub fn group_set_voting_period(
+        env: Env,
+        creator: Address,
+        group_id: u64,
+        seconds: u64,
+    ) -> Result<(), Error> {
+        voting::set_voting_period(&env, creator, group_id, seconds)
+    }
+
+    /// Propose spending `amount` from the group pool to `recipient`. Any member
+    /// may propose once the group is closed and a voting period is configured.
+    pub fn group_propose(
+        env: Env,
+        proposer: Address,
+        group_id: u64,
+        recipient: Address,
+        amount: i128,
+    ) -> Result<u64, Error> {
+        voting::propose(&env, proposer, group_id, recipient, amount)
+    }
+
+    /// Cast a vote on a proposal. One vote per member, either way, while the
+    /// voting window is open.
+    pub fn group_vote(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        approve: bool,
+    ) -> Result<(), Error> {
+        voting::vote(&env, voter, proposal_id, approve)
+    }
+
+    /// Settle a proposal once its voting window has closed. Permissionless;
+    /// returns whether it passed, and on a pass pays the pool to the recipient.
+    pub fn group_execute(env: Env, caller: Address, proposal_id: u64) -> Result<bool, Error> {
+        voting::execute(&env, caller, proposal_id)
+    }
+
+    pub fn group_proposal(env: Env, proposal_id: u64) -> Result<Proposal, Error> {
+        voting::get_proposal(&env, proposal_id)
+    }
+
+    // --- interest ----------------------------------------------------------
+    /// Set the annual interest rate applied to interest accounts, in basis
+    /// points. Admin-only; `0` disables interest.
+    pub fn set_interest_rate(env: Env, caller: Address, rate_bps: u32) -> Result<(), Error> {
+        interest::set_rate(&env, caller, rate_bps)
+    }
+
+    /// The annual interest rate, in basis points. `0` means no interest.
+    pub fn interest_rate_bps(env: Env) -> u32 {
+        interest::rate_bps(&env)
+    }
+
+    /// Set the compounding frequency for interest accounts. Admin-only.
+    pub fn set_interest_frequency(
+        env: Env,
+        caller: Address,
+        frequency: CompoundFrequency,
+    ) -> Result<(), Error> {
+        interest::set_frequency(&env, caller, frequency)
+    }
+
+    /// The current compounding frequency (defaults to `Annually`).
+    pub fn interest_frequency(env: Env) -> CompoundFrequency {
+        interest::frequency(&env)
+    }
+
+    /// Deposit into the caller's interest-bearing account, creating it on
+    /// first deposit and settling any interest accrued so far.
+    pub fn interest_deposit(env: Env, owner: Address, amount: i128) -> Result<(), Error> {
+        interest::deposit(&env, owner, amount)
+    }
+
+    /// Withdraw from the caller's interest account, settling accrued interest
+    /// into the principal first.
+    pub fn interest_withdraw(env: Env, owner: Address, amount: i128) -> Result<(), Error> {
+        interest::withdraw(&env, owner, amount)
+    }
+
+    /// Credit accrued interest into the caller's principal and return the
+    /// amount credited.
+    pub fn interest_claim(env: Env, owner: Address) -> Result<i128, Error> {
+        interest::claim(&env, owner)
+    }
+
+    /// Read an interest account (or `NotFound`).
+    pub fn interest_account(env: Env, owner: Address) -> Result<InterestAccount, Error> {
+        interest::get_account(&env, owner)
+    }
+
+    /// Preview the interest accrued but not yet credited to `owner`.
+    pub fn interest_accrued(env: Env, owner: Address) -> Result<i128, Error> {
+        interest::accrued(&env, owner)
     }
 }

@@ -35,6 +35,9 @@ pub const TOPIC_LOCKED_CREATED: &str = "locked_created";
 pub const TOPIC_LOCKED_TOP_UP: &str = "locked_top_up";
 /// Emitted at the end of a successful `locked_withdraw` call.
 pub const TOPIC_LOCKED_WITHDRAW: &str = "locked_withdraw";
+/// Emitted at the end of a successful `locked_early_withdraw` call (a
+/// penalized withdrawal before `unlock_at`).
+pub const TOPIC_LOCKED_EARLY_WITHDRAW: &str = "locked_early_withdraw";
 
 // --- goal ------------------------------------------------------------------
 /// Emitted at the end of a successful `goal_create` call.
@@ -47,6 +50,11 @@ pub const TOPIC_GOAL_CONTRIBUTION: &str = "goal_contribution";
 pub const TOPIC_GOAL_REACHED: &str = "goal_reached";
 /// Emitted at the end of a successful `goal_claim` call.
 pub const TOPIC_GOAL_CLAIMED: &str = "goal_claimed";
+/// Emitted at the end of a successful `goal_set_auto_renew` call.
+pub const TOPIC_GOAL_AUTO_RENEW_SET: &str = "goal_auto_renew_set";
+/// Emitted when claiming an auto-renewing goal restarts it (co-emitted with
+/// `goal_claimed` in the same `goal_claim` call).
+pub const TOPIC_GOAL_RENEWED: &str = "goal_renewed";
 
 // --- group -------------------------------------------------------------
 /// Emitted at the end of a successful `group_create` call.
@@ -68,3 +76,27 @@ pub const TOPIC_GROUP_SHARES_SET: &str = "group_shares_set";
 /// Topics: `(Symbol("group_split_settled"), member: Address, group_id: u64)`
 /// Data:   `(group_id: u64, member: Address, amount: i128, timestamp: u64)`
 pub const TOPIC_GROUP_SPLIT_SETTLED: &str = "group_split_settled";
+
+// --- group voting ------------------------------------------------------
+/// Emitted at the end of a successful `group_set_voting_period` call.
+pub const TOPIC_GROUP_VOTING_PERIOD_SET: &str = "group_voting_period_set";
+/// Emitted at the end of a successful `group_propose` call.
+pub const TOPIC_GROUP_PROPOSAL_CREATED: &str = "group_proposal_created";
+/// Emitted on every successful `group_vote` call.
+pub const TOPIC_GROUP_VOTE_CAST: &str = "group_vote_cast";
+/// Emitted at the end of a successful `group_execute` call, recording the
+/// outcome (`passed`) and the amount actually paid out (`spent`, 0 on a fail).
+pub const TOPIC_GROUP_PROPOSAL_EXECUTED: &str = "group_proposal_executed";
+
+// --- interest ----------------------------------------------------------
+/// Emitted at the end of a successful `set_interest_rate` call.
+pub const TOPIC_INTEREST_RATE_SET: &str = "interest_rate_set";
+/// Emitted at the end of a successful `set_interest_frequency` call.
+pub const TOPIC_INTEREST_FREQUENCY_SET: &str = "interest_frequency_set";
+/// Emitted at the end of a successful `interest_deposit` call.
+pub const TOPIC_INTEREST_DEPOSIT: &str = "interest_deposit";
+/// Emitted at the end of a successful `interest_withdraw` call.
+pub const TOPIC_INTEREST_WITHDRAW: &str = "interest_withdraw";
+/// Emitted at the end of a successful `interest_claim` call, recording the
+/// interest credited to principal.
+pub const TOPIC_INTEREST_CLAIMED: &str = "interest_claimed";

@@ -36,6 +36,9 @@ pub fn create(env: &Env, creator: Address, name: String) -> Result<u64, Error> {
         shares_bps: Map::new(env),
         open: true,
         created_at: now,
+        // Proposals are opt-in: the creator must configure a voting window
+        // via `group_set_voting_period` before any proposal can be opened.
+        voting_period: 0,
     };
 
     // Store the group
