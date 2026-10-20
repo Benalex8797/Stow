@@ -4,11 +4,9 @@ import {
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
 import { from, Observable } from 'rxjs';
 import { concatMap, map } from 'rxjs/operators';
-import { AdminAuditLog } from '../entities/admin-audit-log.entity';
+import { AuditLogService } from '../audit-log.service';
 
 interface AdminRequest {
   user?: { id: string };
@@ -22,6 +20,8 @@ function resolveAction(method: string, url: string): string {
   const path = url.split('?')[0];
   if (method === 'GET' && path.endsWith('/admin/savings/overview'))
     return 'VIEW_SAVINGS_OVERVIEW';
+  if (method === 'GET' && path.includes('/admin/savings/yield'))
+    return 'VIEW_YIELD_OVERVIEW';
   if (method === 'PATCH' && path.includes('/ban')) return 'BAN_USER';
   if (method === 'PATCH' && path.includes('/unban')) return 'UNBAN_USER';
   if (method === 'PATCH' && path.includes('/role')) return 'UPDATE_USER_ROLE';
@@ -61,6 +61,9 @@ function resolveTarget(
   if (path.endsWith('/admin/savings/overview')) {
     return { target_type: 'savings', target_id: 'overview' };
   }
+  if (path.includes('/admin/savings/yield')) {
+    return { target_type: 'savings', target_id: 'yield' };
+  }
   return { target_type: null, target_id: id };
 }
 
@@ -77,7 +80,6 @@ function buildMetadata(
 ): Record<string, unknown> | null {
   if (action !== 'BULK_USER_ACTION' || !response) return body ?? null;
 
-  // Record per-user outcomes so partial failures are traceable in the log.
   const { succeeded, failed, results = [] } = response as BulkResponse;
   return {
     ...(body ?? {}),
@@ -94,10 +96,7 @@ function buildMetadata(
 
 @Injectable()
 export class AdminAuditInterceptor implements NestInterceptor {
-  constructor(
-    @InjectRepository(AdminAuditLog)
-    private readonly auditRepo: Repository<AdminAuditLog>,
-  ) {}
+  constructor(private readonly auditLogService: AuditLogService) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const req = context.switchToHttp().getRequest<AdminRequest>();
@@ -110,15 +109,15 @@ export class AdminAuditInterceptor implements NestInterceptor {
         const action = resolveAction(method, url);
         const { target_type, target_id } = resolveTarget(url, params);
 
-        const entry = this.auditRepo.create({
-          actor_id: user.id,
-          action,
-          target_type,
-          target_id,
-          metadata: buildMetadata(action, body, response),
-        });
-
-        return from(this.auditRepo.save(entry)).pipe(map(() => response));
+        return from(
+          this.auditLogService.log({
+            actor_id: user.id,
+            action,
+            target_type,
+            target_id,
+            metadata: buildMetadata(action, body, response),
+          }),
+        ).pipe(map(() => response));
       }),
     );
   }

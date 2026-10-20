@@ -15,6 +15,7 @@ import { plainToInstance } from 'class-transformer';
 import { Public } from '../common/decorators/public.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { UsersService } from './users.service';
+import { ReferralService } from './referral.service';
 import { PublicUserDto } from './dto/public-user.dto';
 import { UserResponseDto } from './dto/user-response.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -36,10 +37,14 @@ import {
   ClaimReferralResponseDto,
   MyReferralsResponseDto,
 } from './dto/referral.dto';
+import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly referralService: ReferralService,
+  ) {}
 
   @Get('me')
   @ApiOperation({ summary: 'Fetch own profile' })
@@ -65,10 +70,8 @@ export class UsersController {
     type: MyReferralsResponseDto,
   })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getMyReferrals(
-    @CurrentUser() user: User,
-  ): Promise<MyReferralsResponseDto> {
-    return this.usersService.getMyReferrals(user.id);
+  async getMyReferrals(@CurrentUser() user: User) {
+    return this.referralService.getMyReferrals(user.id);
   }
 
   @Post('me/referrals/claim')
@@ -83,23 +86,25 @@ export class UsersController {
     description: 'Referral recorded successfully',
     type: ClaimReferralResponseDto,
   })
-  @ApiResponse({
-    status: 400,
-    description: 'Self-referral is not allowed',
-  })
-  @ApiResponse({
-    status: 404,
-    description: 'Referrer not found',
-  })
-  @ApiResponse({
-    status: 409,
-    description: 'A referral has already been recorded for this account',
-  })
+  @ApiResponse({ status: 400, description: 'Self-referral is not allowed' })
+  @ApiResponse({ status: 404, description: 'Referrer not found' })
+  @ApiResponse({ status: 409, description: 'A referral has already been recorded for this account' })
   async claimReferral(
     @CurrentUser() user: User,
     @Body() dto: ClaimReferralDto,
   ): Promise<ClaimReferralResponseDto> {
-    return this.usersService.claimReferral(user.id, dto.referrer_id);
+    await this.referralService.claimReferral(user.id, dto.referrer_id);
+    return { success: true, message: 'Referral recorded successfully' };
+  }
+
+  @Get('me/referrals/rewards')
+  @ApiOperation({ summary: 'Paginated list of rewards earned through referrals' })
+  @ApiResponse({ status: 200, description: 'Rewards list' })
+  async getMyReferralRewards(
+    @CurrentUser() user: User,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.referralService.getMyRewards(user.id, query);
   }
 
   @Patch('me')

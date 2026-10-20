@@ -30,6 +30,7 @@ import { UpdateUserRoleDto } from './dto/update-user-role.dto';
 import { SavingsOverviewDto } from './dto/savings-overview.dto';
 import { YieldAdminOverviewResponseDto } from '../savings/dto/yield-admin-overview-response.dto';
 import { AdminAuditInterceptor } from './interceptors/admin-audit.interceptor';
+import { AuditLogQueryDto } from './dto/audit-log-query.dto';
 
 type RequestUser = Request & { user: { id: string } };
 
@@ -229,12 +230,35 @@ export class AdminController {
   @CacheTTL(60)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get admin audit logs with filtering' })
-  @ApiResponse({
-    status: 200,
-    description: 'Paginated audit logs',
-  })
-  async getAuditLogs(@Query() query: any) {
+  @ApiResponse({ status: 200, description: 'Paginated audit logs' })
+  async getAuditLogs(@Query() query: AuditLogQueryDto) {
     return this.adminService.getAuditLogs(query);
+  }
+
+  @Get('audit-logs/integrity')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Verify tamper-proof integrity of the audit log chain' })
+  @ApiResponse({ status: 200, description: 'Integrity check report' })
+  async verifyAuditIntegrity() {
+    return this.adminService.verifyAuditIntegrity();
+  }
+
+  @Get('referrals/overview')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Platform-wide referral stats overview' })
+  @ApiResponse({ status: 200, description: 'Referral overview metrics' })
+  async getReferralOverview() {
+    return this.adminService.getReferralOverview();
+  }
+
+  @Get('referrals')
+  @UseInterceptors(CacheInterceptor)
+  @CacheTTL(60)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Paginated list of all referrals (admin)' })
+  @ApiResponse({ status: 200, description: 'Paginated referral list' })
+  async listReferrals(@Query() query: any) {
+    return this.adminService.listReferrals(query);
   }
 
   @Get('reports/export')

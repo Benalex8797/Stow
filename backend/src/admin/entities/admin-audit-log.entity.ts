@@ -41,6 +41,15 @@ export class AdminAuditLog {
   @ApiPropertyOptional()
   metadata: Record<string, unknown> | null;
 
+  /**
+   * SHA-256 HMAC of (previous_checksum + id + actor_id + action + created_at).
+   * Forms a hash chain — any row mutation breaks the chain and is detectable
+   * via AuditLogService.verifyIntegrity().
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  @ApiPropertyOptional()
+  checksum: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   @ApiProperty()
   created_at: Date;

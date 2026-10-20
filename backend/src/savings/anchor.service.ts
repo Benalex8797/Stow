@@ -3,6 +3,7 @@ import {
   Inject,
   Injectable,
   Logger,
+  Optional,
 } from '@nestjs/common';
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Cache } from 'cache-manager';
@@ -15,6 +16,7 @@ import {
   AnchorDepositStatus,
 } from './entities/anchor-deposit.entity';
 import { InitiateDepositDto } from './dto/initiate-deposit.dto';
+import { ReferralService } from '../users/referral.service';
 
 /** SEP-38 quote shape returned to callers */
 export interface Sep38Quote {
@@ -57,6 +59,7 @@ export class AnchorService {
     private readonly depositRepo: Repository<AnchorDeposit>,
     private readonly configService: ConfigService,
     @Inject(CACHE_MANAGER) private readonly cache: Cache,
+    @Optional() private readonly referralService: ReferralService,
   ) {
     this.anchorBaseUrl = this.configService.get<string>(
       'ANCHOR_BASE_URL',
@@ -115,6 +118,16 @@ export class AnchorService {
     this.logger.log(
       `SEP-24 deposit initiated: deposit_id=${deposit.id} transaction_id=${sep24Response.id} user=${userId}`,
     );
+
+    // On first deposit, qualify any pending referral for this user.
+    if (this.referralService) {
+      const depositCount = await this.depositRepo.count({ where: { user_id: userId } });
+      if (depositCount === 1) {
+        await this.referralService.recordQualifyingAction(userId).catch((err) =>
+          this.logger.warn(`Referral qualification failed for user ${userId}: ${(err as Error).message}`),
+        );
+      }
+    }
 
     return {
       deposit_id: deposit.id,

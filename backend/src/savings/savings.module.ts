@@ -16,16 +16,17 @@ import { BalanceController } from './balance.controller';
 import { SavingsController } from './savings.controller';
 import { SavingsService } from './savings.service';
 import { WebhooksModule } from '../webhooks/webhooks.module';
-
 import { YieldPosition } from './entities/yield-position.entity';
+import { ReferralModule } from '../referral/referral.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([AnchorDeposit, Balance, Group, GroupMember, YieldPosition]),
     CacheModule.register({ ttl: 10_000 }),
     GoalsModule,
+    ReferralModule,
   ],
-  controllers: [AnchorController, BalanceController, SavingsController],
+  controllers: [AnchorController, AnchorCallbackController, BalanceController, SavingsController],
   providers: [
     AnchorService,
     BalanceService,

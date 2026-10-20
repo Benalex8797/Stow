@@ -26,6 +26,7 @@ import { AccountModule } from './account/account.module';
 import { SavingsModule } from './savings/savings.module';
 import { ActivityModule } from './activity/activity.module';
 import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
+import { ReferralModule } from './referral/referral.module';
 
 @Module({
   imports: [
@@ -104,6 +105,7 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
     AccountModule,
     SavingsModule,
     ActivityModule,
+    ReferralModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

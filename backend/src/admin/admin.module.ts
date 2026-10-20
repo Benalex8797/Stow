@@ -7,10 +7,12 @@ import { VerifiedAddress } from './entities/verified-address.entity';
 import { AnchorDeposit } from '../savings/entities/anchor-deposit.entity';
 import { AdminController } from './admin.controller';
 import { AdminService } from './admin.service';
+import { AuditLogService } from './audit-log.service';
 import { AdminAuditLog } from './entities/admin-audit-log.entity';
 import { AdminAuditInterceptor } from './interceptors/admin-audit.interceptor';
 import { ContractEvent } from '../indexer/entities/contract-event.entity';
 import { SorobanModule } from '../soroban/soroban.module';
+import { ReferralModule } from '../referral/referral.module';
 
 @Module({
   imports: [
@@ -24,9 +26,10 @@ import { SorobanModule } from '../soroban/soroban.module';
     ]),
     CacheModule.register(),
     SorobanModule,
+    ReferralModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService, AdminAuditInterceptor],
-  exports: [AdminService],
+  providers: [AdminService, AuditLogService, AdminAuditInterceptor],
+  exports: [AdminService, AuditLogService],
 })
 export class AdminModule {}

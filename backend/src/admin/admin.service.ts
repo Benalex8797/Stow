@@ -7,6 +7,9 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { AuditLogService } from './audit-log.service';
+import { AuditLogQueryDto } from './dto/audit-log-query.dto';
+import { ReferralService } from '../users/referral.service';
 import { User } from '../users/entities/user.entity';
 import { UserFlag } from './entities/user-flag.entity';
 import { VerifiedAddress } from './entities/verified-address.entity';
@@ -66,6 +69,8 @@ export class AdminService {
     private readonly contractEventRepository: Repository<ContractEvent>,
     private readonly sorobanService: SorobanService,
     private readonly configService: ConfigService,
+    private readonly auditLogService: AuditLogService,
+    private readonly referralService: ReferralService,
   ) {}
 
   async listUsers(query: ListUsersQueryDto) {
@@ -725,31 +730,24 @@ export class AdminService {
     };
   }
 
-  /**
-   * Get admin audit logs with filtering
-   */
-  async getAuditLogs(query: any) {
-    const {
-      page = 1,
-      limit = 50,
-      action,
-      admin_id,
-      start_date,
-      end_date,
-    } = query;
-    const skip = (page - 1) * limit;
+  /** Get admin audit logs with filtering — delegates to AuditLogService. */
+  async getAuditLogs(query: AuditLogQueryDto) {
+    return this.auditLogService.query(query);
+  }
 
-    // This assumes AdminAuditLog entity exists
-    // Implementation would depend on actual audit log structure
-    return {
-      data: [],
-      meta: {
-        total: 0,
-        page,
-        limit,
-        totalPages: 0,
-      },
-    };
+  /** Verify tamper-proof integrity of the audit log chain. */
+  async verifyAuditIntegrity() {
+    return this.auditLogService.verifyIntegrity();
+  }
+
+  /** Platform-wide referral overview for admin dashboard. */
+  async getReferralOverview() {
+    return this.referralService.getAdminOverview();
+  }
+
+  /** Paginated list of all referrals with optional status filter. */
+  async listReferrals(query: any) {
+    return this.referralService.listReferrals(query);
   }
 
   /**
