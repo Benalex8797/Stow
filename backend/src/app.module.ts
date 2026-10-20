@@ -27,6 +27,7 @@ import { SavingsModule } from './savings/savings.module';
 import { ActivityModule } from './activity/activity.module';
 import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
 import { BackupModule } from './backup/backup.module';
+import { AnchorModule } from './anchor/anchor.module';
 
 @Module({
   imports: [
@@ -106,6 +107,7 @@ import { BackupModule } from './backup/backup.module';
     SavingsModule,
     ActivityModule,
     BackupModule,
+    AnchorModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
