@@ -11,6 +11,7 @@ import { AdminAuditLog } from './entities/admin-audit-log.entity';
 import { AdminAuditInterceptor } from './interceptors/admin-audit.interceptor';
 import { ContractEvent } from '../indexer/entities/contract-event.entity';
 import { SorobanModule } from '../soroban/soroban.module';
+import { CsvImportService } from './csv-import.service';
 
 @Module({
   imports: [
@@ -26,7 +27,7 @@ import { SorobanModule } from '../soroban/soroban.module';
     SorobanModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService, AdminAuditInterceptor],
-  exports: [AdminService],
+  providers: [AdminService, AdminAuditInterceptor, CsvImportService],
+  exports: [AdminService, CsvImportService],
 })
 export class AdminModule {}

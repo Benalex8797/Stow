@@ -28,6 +28,7 @@ import { ActivityModule } from './activity/activity.module';
 import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
 import { BackupModule } from './backup/backup.module';
 import { AnchorModule } from './anchor/anchor.module';
+import { CsvImportModule } from './csv-import/csv-import.module';
 
 @Module({
   imports: [
@@ -108,6 +109,7 @@ import { AnchorModule } from './anchor/anchor.module';
     ActivityModule,
     BackupModule,
     AnchorModule,
+    CsvImportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
