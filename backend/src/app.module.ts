@@ -29,6 +29,7 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
 import { BackupModule } from './backup/backup.module';
 import { AnchorModule } from './anchor/anchor.module';
 import { CsvImportModule } from './csv-import/csv-import.module';
+import { GraphqlApiModule } from './graphql/graphql.module';
 
 @Module({
   imports: [
@@ -110,6 +111,7 @@ import { CsvImportModule } from './csv-import/csv-import.module';
     BackupModule,
     AnchorModule,
     CsvImportModule,
+    GraphqlApiModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
