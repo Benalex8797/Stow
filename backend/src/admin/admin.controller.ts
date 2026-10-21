@@ -24,6 +24,8 @@ import {
   BulkUserActionDto,
   BulkUserActionResponseDto,
 } from './dto/bulk-user-action.dto';
+import { CsvImportDto } from './dto/csv-import.dto';
+import { CsvImportResultDto } from './dto/csv-import-result.dto';
 import { ListUsersQueryDto } from './dto/list-users-query.dto';
 import { ListVerifiedAddressesQueryDto } from './dto/list-verified-addresses-query.dto';
 import { UpdateUserRoleDto } from './dto/update-user-role.dto';
@@ -140,6 +142,34 @@ export class AdminController {
     @Request() req: RequestUser,
   ): Promise<BulkUserActionResponseDto> {
     return this.adminService.bulkUserAction(
+      dto,
+      (req as { user: { id: string } }).user.id,
+    );
+  }
+
+  @Post('users/import/csv')
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(AdminAuditInterceptor)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Bulk import users from a CSV payload',
+    description:
+      'Parses and validates the CSV, processes valid rows in configurable ' +
+      'batches, and returns structured per-row errors alongside success and ' +
+      'failure counts.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'CSV import result with counts and per-row errors',
+    type: CsvImportResultDto,
+  })
+  @ApiResponse({ status: 400, description: 'Malformed CSV or missing headers' })
+  @ApiResponse({ status: 403, description: 'Forbidden' })
+  async importUsersFromCsv(
+    @Body() dto: CsvImportDto,
+    @Request() req: RequestUser,
+  ): Promise<CsvImportResultDto> {
+    return this.adminService.importUsersFromCsv(
       dto,
       (req as { user: { id: string } }).user.id,
     );

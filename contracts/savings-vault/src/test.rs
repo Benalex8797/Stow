@@ -17,6 +17,7 @@ use soroban_sdk::{
 use crate::error::Error;
 use crate::events::{TOPIC_DEPOSIT, TOPIC_WITHDRAW};
 use crate::group_split;
+use crate::types::CompoundFrequency;
 use crate::{SavingsVault, SavingsVaultClient};
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,21 @@ fn mint(env: &Env, token: &Address, token_admin: &Address, recipient: &Address, 
     let sac = StellarAssetClient::new(env, token);
     env.mock_all_auths();
     sac.mint(recipient, &amount);
+}
+
+/// Set the ledger timestamp (and sequence number) so time-lock tests can
+/// travel forward deterministically.
+fn set_ledger_time(env: &Env, timestamp: u64, sequence_number: u32) {
+    env.ledger().set(LedgerInfo {
+        timestamp,
+        protocol_version: 22,
+        sequence_number,
+        network_id: Default::default(),
+        base_reserve: 5_000_000,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 3_110_400,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +256,103 @@ fn goal_claim_before_reached_rejected() {
     let result = client.try_goal_claim(&owner, &goal_id);
     assert_eq!(result, Err(Ok(Error::GoalNotReached)));
     assert_eq!(client.goal(&goal_id).saved_amount, SAVED);
+}
+
+/// Issue #431 — goal auto-renewal.
+///
+/// With `auto_renew` enabled, claiming a reached goal pays the owner out but
+/// keeps the goal alive: `saved_amount` resets to 0 and `reached_at` clears,
+/// so the owner can save toward the same target again (and claim again).
+#[test]
+fn goal_auto_renew_restarts_on_claim() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const TARGET: i128 = 100_000_000;
+    mint(&env, &token, &token_admin, &owner, TARGET * 2);
+
+    let goal_id = client.goal_create(&owner, &String::from_str(&env, "rainy day"), &TARGET);
+    assert!(
+        !client.goal(&goal_id).auto_renew,
+        "goals must default to no auto-renewal"
+    );
+
+    // Opt in, contribute to the target, and claim.
+    client.goal_set_auto_renew(&owner, &goal_id, &true);
+    client.goal_contribute(&owner, &goal_id, &TARGET);
+    assert!(client.goal(&goal_id).reached_at.is_some());
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let balance_before = token_client.balance(&owner);
+
+    client.goal_claim(&owner, &goal_id);
+
+    assert_eq!(
+        token_client.balance(&owner) - balance_before,
+        TARGET,
+        "claim must still pay the full saved amount out"
+    );
+
+    let renewed = client.goal(&goal_id);
+    assert_eq!(renewed.saved_amount, 0, "renewed goal restarts at zero");
+    assert!(
+        renewed.reached_at.is_none(),
+        "renewed goal clears its reached milestone"
+    );
+    assert!(renewed.auto_renew, "renewal setting is retained");
+    assert_eq!(renewed.target_amount, TARGET, "target is preserved");
+
+    // The goal is live again: contribute to the target and claim a second
+    // time, proving the restart is a full cycle rather than a one-off.
+    client.goal_contribute(&owner, &goal_id, &TARGET);
+    assert!(client.goal(&goal_id).reached_at.is_some());
+    client.goal_claim(&owner, &goal_id);
+    assert_eq!(client.goal(&goal_id).saved_amount, 0);
+}
+
+/// An auto-renewing goal can be claimed again, unlike a goal that opted out
+/// (which is closed on claim — covered by `goal_claim_after_reached_returns_funds`).
+#[test]
+fn goal_auto_renew_can_be_disabled_again() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const TARGET: i128 = 100_000_000;
+    mint(&env, &token, &token_admin, &owner, TARGET);
+
+    let goal_id = client.goal_create(&owner, &String::from_str(&env, "rainy day"), &TARGET);
+    client.goal_set_auto_renew(&owner, &goal_id, &true);
+    client.goal_set_auto_renew(&owner, &goal_id, &false);
+    client.goal_contribute(&owner, &goal_id, &TARGET);
+    client.goal_claim(&owner, &goal_id);
+
+    // Renewal was switched back off, so the goal closes on claim.
+    assert_eq!(client.try_goal(&goal_id), Err(Ok(Error::NotFound)));
+}
+
+/// Only the goal's owner may toggle auto-renewal.
+#[test]
+fn goal_set_auto_renew_by_non_owner_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token) = setup_with_token(&env);
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    let goal_id = client.goal_create(&owner, &String::from_str(&env, "rainy day"), &1_000_000);
+
+    let result = client.try_goal_set_auto_renew(&attacker, &goal_id, &true);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert!(!client.goal(&goal_id).auto_renew);
 }
 
 /// Closing a group, assigning shares, and settling pays each member their
@@ -706,6 +819,221 @@ fn locked_plan_enforces_unlock_time_round_trip() {
         plan.balance, 0,
         "locked plan balance must be zero after a full post-unlock withdrawal",
     );
+}
+
+/// Issue #432 — early partial withdrawal from a locked plan.
+///
+/// With a penalty configured and the minimum lock period elapsed, the owner
+/// can withdraw part of a still-locked balance early: the penalty is paid to
+/// the configured recipient, the remainder to the owner, and the plan keeps
+/// the reduced balance (it is not closed).
+#[test]
+fn locked_early_withdraw_charges_penalty_and_reduces_balance() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    const LOCKED_AMOUNT: i128 = 100_000_000; // 100 USDC
+    const WITHDRAW: i128 = 40_000_000; // 40 USDC
+    const PENALTY_BPS: u32 = 500; // 5%
+    const PENALTY: i128 = WITHDRAW * PENALTY_BPS as i128 / 10_000; // 2 USDC
+    const NET: i128 = WITHDRAW - PENALTY; // 38 USDC
+
+    mint(&env, &token, &token_admin, &owner, LOCKED_AMOUNT);
+
+    // Configure a 5% penalty routed to a third-party recipient.
+    client.set_early_withdraw_penalty_bps(&PENALTY_BPS);
+    client.set_penalty_recipient(&recipient);
+    assert_eq!(client.early_withdraw_penalty_bps(), PENALTY_BPS);
+    assert_eq!(client.penalty_recipient(), recipient);
+
+    let now: u64 = 1_000_000;
+    set_ledger_time(&env, now, 100);
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &(now + 10_000));
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let owner_before = token_client.balance(&owner);
+
+    client.locked_early_withdraw(&owner, &plan_id, &WITHDRAW);
+
+    assert_eq!(
+        token_client.balance(&owner) - owner_before,
+        NET,
+        "owner must receive the withdrawn amount minus the penalty",
+    );
+    assert_eq!(
+        token_client.balance(&recipient),
+        PENALTY,
+        "penalty must be paid to the configured recipient",
+    );
+    assert_eq!(
+        client.locked_plan(&plan_id).balance,
+        LOCKED_AMOUNT - WITHDRAW,
+        "plan must keep the un-withdrawn remainder",
+    );
+}
+
+/// Early withdrawal must be rejected until the plan has been locked for at
+/// least the configured minimum period.
+#[test]
+fn locked_early_withdraw_before_min_lock_period_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const LOCKED_AMOUNT: i128 = 100_000_000;
+    const MIN_LOCK_PERIOD: u64 = 5_000;
+
+    mint(&env, &token, &token_admin, &owner, LOCKED_AMOUNT);
+    client.set_min_lock_period(&MIN_LOCK_PERIOD);
+    assert_eq!(client.min_lock_period(), MIN_LOCK_PERIOD);
+
+    let now: u64 = 1_000_000;
+    set_ledger_time(&env, now, 100);
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &(now + 10_000));
+
+    // Still inside the minimum lock period: window not open yet.
+    set_ledger_time(&env, now + MIN_LOCK_PERIOD - 1, 101);
+    let result = client.try_locked_early_withdraw(&owner, &plan_id, &1_000_000);
+    assert_eq!(result, Err(Ok(Error::TimeWindowNotOpen)));
+    assert_eq!(client.locked_plan(&plan_id).balance, LOCKED_AMOUNT);
+
+    // Once the minimum period has elapsed (and before unlock), it succeeds.
+    set_ledger_time(&env, now + MIN_LOCK_PERIOD, 102);
+    client.locked_early_withdraw(&owner, &plan_id, &1_000_000);
+    assert_eq!(client.locked_plan(&plan_id).balance, LOCKED_AMOUNT - 1_000_000);
+}
+
+/// Once `unlock_at` has passed, the penalized early path is closed; the
+/// penalty-free `locked_withdraw` applies instead.
+#[test]
+fn locked_early_withdraw_after_unlock_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const LOCKED_AMOUNT: i128 = 100_000_000;
+
+    mint(&env, &token, &token_admin, &owner, LOCKED_AMOUNT);
+
+    let now: u64 = 2_000_000;
+    set_ledger_time(&env, now, 100);
+    let unlock_at = now + 10_000;
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &unlock_at);
+
+    set_ledger_time(&env, unlock_at, 101);
+    let result = client.try_locked_early_withdraw(&owner, &plan_id, &1_000_000);
+    assert_eq!(result, Err(Ok(Error::OperationExpired)));
+    assert_eq!(client.locked_plan(&plan_id).balance, LOCKED_AMOUNT);
+}
+
+/// An early withdrawal larger than the plan balance is rejected with
+/// `InsufficientBalance` and moves no funds.
+#[test]
+fn locked_early_withdraw_over_balance_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const LOCKED_AMOUNT: i128 = 100_000_000;
+
+    mint(&env, &token, &token_admin, &owner, LOCKED_AMOUNT);
+
+    let now: u64 = 3_000_000;
+    set_ledger_time(&env, now, 100);
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &(now + 10_000));
+
+    let result = client.try_locked_early_withdraw(&owner, &plan_id, &(LOCKED_AMOUNT + 1));
+    assert_eq!(result, Err(Ok(Error::InsufficientBalance)));
+    assert_eq!(client.locked_plan(&plan_id).balance, LOCKED_AMOUNT);
+}
+
+/// Only the plan's owner may withdraw early.
+#[test]
+fn locked_early_withdraw_by_non_owner_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    let attacker = Address::generate(&env);
+
+    const LOCKED_AMOUNT: i128 = 100_000_000;
+
+    mint(&env, &token, &token_admin, &owner, LOCKED_AMOUNT);
+
+    let now: u64 = 4_000_000;
+    set_ledger_time(&env, now, 100);
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &(now + 10_000));
+
+    let result = client.try_locked_early_withdraw(&attacker, &plan_id, &1_000_000);
+    assert_eq!(result, Err(Ok(Error::Unauthorized)));
+    assert_eq!(client.locked_plan(&plan_id).balance, LOCKED_AMOUNT);
+}
+
+/// With the default (unset) penalty, early withdrawal is penalty-free: the
+/// owner receives the full amount and no recipient transfer occurs.
+#[test]
+fn locked_early_withdraw_defaults_to_no_penalty() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const LOCKED_AMOUNT: i128 = 100_000_000;
+    const WITHDRAW: i128 = 30_000_000;
+
+    assert_eq!(client.early_withdraw_penalty_bps(), 0);
+    mint(&env, &token, &token_admin, &owner, LOCKED_AMOUNT);
+
+    let now: u64 = 5_000_000;
+    set_ledger_time(&env, now, 100);
+    let plan_id = client.locked_create(&owner, &LOCKED_AMOUNT, &(now + 10_000));
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let owner_before = token_client.balance(&owner);
+
+    client.locked_early_withdraw(&owner, &plan_id, &WITHDRAW);
+
+    assert_eq!(
+        token_client.balance(&owner) - owner_before,
+        WITHDRAW,
+        "with no penalty configured the owner receives the full amount",
+    );
+    assert_eq!(client.locked_plan(&plan_id).balance, LOCKED_AMOUNT - WITHDRAW);
+}
+
+/// The configured penalty rate is capped at 100% (10_000 bps).
+#[test]
+fn set_early_withdraw_penalty_bps_above_max_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token) = setup_with_token(&env);
+
+    let too_high: u32 = 10_001;
+    let result = client.try_set_early_withdraw_penalty_bps(&too_high);
+    assert_eq!(result, Err(Ok(Error::InvalidParameters)));
+    assert_eq!(client.early_withdraw_penalty_bps(), 0);
+
+    client.set_early_withdraw_penalty_bps(&10_000);
+    assert_eq!(client.early_withdraw_penalty_bps(), 10_000);
 }
 
 /// Locked plan: `InsufficientBalance` takes priority over `StillLocked`.
@@ -1768,6 +2096,55 @@ fn locked_create_emits_typed_event_with_expected_topic_and_data() {
     assert_eq!(decoded_data, (plan_id, owner, AMOUNT, unlock_at, now));
 }
 
+/// `locked_early_withdraw` emits a `locked_early_withdraw` event with topics
+/// `(locked_early_withdraw, owner, id)` and data `(id, owner, amount,
+/// penalty, new_balance, timestamp)`.
+#[test]
+fn locked_early_withdraw_emits_typed_event_with_expected_topic_and_data() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const AMOUNT: i128 = 50_000_000;
+    const WITHDRAW: i128 = 20_000_000;
+    const PENALTY_BPS: u32 = 500;
+    const PENALTY: i128 = WITHDRAW * PENALTY_BPS as i128 / 10_000;
+
+    mint(&env, &token, &token_admin, &owner, AMOUNT);
+    client.set_early_withdraw_penalty_bps(&PENALTY_BPS);
+
+    let now: u64 = 7_000_000;
+    set_ledger_time(&env, now, 100);
+    let plan_id = client.locked_create(&owner, &AMOUNT, &(now + 10_000));
+
+    // Move to a time inside the early-withdrawal window, then withdraw.
+    set_ledger_time(&env, now + 1, 101);
+    let call_time = env.ledger().timestamp();
+    client.locked_early_withdraw(&owner, &plan_id, &WITHDRAW);
+
+    let events = env.events().all();
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = (
+        crate::events::TOPIC_LOCKED_EARLY_WITHDRAW,
+        owner.clone(),
+        plan_id,
+    )
+        .into_val(&env);
+    let decoded_data: (u64, Address, i128, i128, i128, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(
+        decoded_data,
+        (plan_id, owner, WITHDRAW, PENALTY, AMOUNT - WITHDRAW, call_time)
+    );
+}
+
 /// `goal_contribute` that first crosses the target emits a `goal_reached`
 /// event with topics `(goal_reached, owner, id)` and data `(id, owner,
 /// saved_amount, target_amount, timestamp)`.
@@ -1802,6 +2179,74 @@ fn goal_reached_emits_typed_event_with_expected_topic_and_data() {
     assert_eq!(contract_id, client.address);
     assert_eq!(topics, expected_topics);
     assert_eq!(decoded_data, (goal_id, owner, CONTRIBUTION, TARGET, now));
+}
+
+/// `goal_set_auto_renew` emits a `goal_auto_renew_set` event with topics
+/// `(goal_auto_renew_set, owner, id)` and data `(id, owner, auto_renew,
+/// timestamp)`.
+#[test]
+fn goal_auto_renew_set_emits_typed_event_with_expected_topic_and_data() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token) = setup_with_token(&env);
+    let owner = Address::generate(&env);
+
+    let goal_id = client.goal_create(&owner, &String::from_str(&env, "New laptop"), &10_000_000);
+    client.goal_set_auto_renew(&owner, &goal_id, &true);
+
+    let now = env.ledger().timestamp();
+    let events = env.events().all();
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = (
+        crate::events::TOPIC_GOAL_AUTO_RENEW_SET,
+        owner.clone(),
+        goal_id,
+    )
+        .into_val(&env);
+    let decoded_data: (u64, Address, bool, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(decoded_data, (goal_id, owner, true, now));
+}
+
+/// Claiming an auto-renewing goal emits a `goal_renewed` event with topics
+/// `(goal_renewed, owner, id)` and data `(id, owner, target_amount,
+/// timestamp)`, after the `goal_claimed` event in the same call.
+#[test]
+fn goal_claim_auto_renew_emits_goal_renewed_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+
+    const TARGET: i128 = 10_000_000;
+    mint(&env, &token, &token_admin, &owner, TARGET);
+
+    let goal_id = client.goal_create(&owner, &String::from_str(&env, "New laptop"), &TARGET);
+    client.goal_set_auto_renew(&owner, &goal_id, &true);
+    client.goal_contribute(&owner, &goal_id, &TARGET);
+
+    client.goal_claim(&owner, &goal_id);
+
+    let now = env.ledger().timestamp();
+    let events = env.events().all();
+    // goal_claim publishes goal_claimed then goal_renewed — renewed is last.
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (crate::events::TOPIC_GOAL_RENEWED, owner.clone(), goal_id).into_val(&env);
+    let decoded_data: (u64, Address, i128, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(decoded_data, (goal_id, owner, TARGET, now));
 }
 
 /// `group_create` emits a `group_created` event with topics
@@ -2111,6 +2556,907 @@ fn group_join_after_close_rejected() {
         result,
         Err(Ok(Error::GroupClosed)),
         "joining a closed group must fail with GroupClosed",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #433 — Group savings voting
+// ---------------------------------------------------------------------------
+
+const VOTING_PERIOD: u64 = 3_600;
+const VOTE_CONTRIB: i128 = 10_000_000;
+
+/// Create a group owned by `creator`, joined by `others`, funded so every
+/// member contributes [`VOTE_CONTRIB`] (pool = `VOTE_CONTRIB * (others.len()
+/// + 1)`), with a `period`-second voting window, then close it. Returns the
+/// group id.
+fn closed_group_with_voting(
+    env: &Env,
+    client: &SavingsVaultClient,
+    token: &Address,
+    token_admin: &Address,
+    creator: &Address,
+    others: &[Address],
+    period: u64,
+) -> u64 {
+    let group_id = client.group_create(creator, &String::from_str(env, "vote-pool"));
+    for m in others {
+        client.group_join(m, &group_id);
+    }
+    mint(env, token, token_admin, creator, VOTE_CONTRIB);
+    client.group_contribute(creator, &group_id, &VOTE_CONTRIB);
+    for m in others {
+        mint(env, token, token_admin, m, VOTE_CONTRIB);
+        client.group_contribute(m, &group_id, &VOTE_CONTRIB);
+    }
+    client.group_set_voting_period(creator, &group_id, &period);
+    client.group_close(creator, &group_id);
+    group_id
+}
+
+/// A proposal that clears the majority threshold pays the recipient and
+/// reduces the pool by exactly the proposed amount.
+#[test]
+fn group_voting_passing_proposal_pays_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let member_c = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[member_b.clone(), member_c.clone()],
+        VOTING_PERIOD,
+    );
+    let pool = VOTE_CONTRIB * 3;
+    assert_eq!(client.group(&group_id).balance, pool);
+
+    // Any member can propose, not just the creator.
+    const SPEND: i128 = 12_000_000;
+    let proposal_id = client.group_propose(&member_b, &group_id, &recipient, &SPEND);
+
+    // Two of three members vote yes — a strict majority.
+    client.group_vote(&creator, &proposal_id, &true);
+    client.group_vote(&member_b, &proposal_id, &true);
+
+    let ends_at = client.group_proposal(&proposal_id).voting_ends_at;
+    set_ledger_time(&env, ends_at + 1, 2);
+
+    let passed = client.group_execute(&member_c, &proposal_id);
+    assert!(passed, "2 of 3 yes votes must carry the proposal");
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&recipient), SPEND);
+    assert_eq!(client.group(&group_id).balance, pool - SPEND);
+
+    let proposal = client.group_proposal(&proposal_id);
+    assert!(proposal.executed);
+    assert!(proposal.passed);
+}
+
+/// A proposal without a majority pays nothing and leaves the pool untouched.
+#[test]
+fn group_voting_rejected_proposal_pays_nothing() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let member_c = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[member_b.clone(), member_c.clone()],
+        VOTING_PERIOD,
+    );
+    let pool = VOTE_CONTRIB * 3;
+    const SPEND: i128 = 5_000_000;
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &SPEND);
+
+    // 1 yes, 2 no — below half of 3 members.
+    client.group_vote(&creator, &proposal_id, &true);
+    client.group_vote(&member_b, &proposal_id, &false);
+    client.group_vote(&member_c, &proposal_id, &false);
+
+    let ends_at = client.group_proposal(&proposal_id).voting_ends_at;
+    set_ledger_time(&env, ends_at + 1, 2);
+
+    let passed = client.group_execute(&creator, &proposal_id);
+    assert!(!passed, "1 of 3 yes votes must not carry the proposal");
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&recipient), 0);
+    assert_eq!(client.group(&group_id).balance, pool);
+    assert!(client.group_proposal(&proposal_id).executed);
+}
+
+/// Voting is rejected once the window has closed.
+#[test]
+fn group_vote_after_window_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[member_b.clone()],
+        VOTING_PERIOD,
+    );
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &1_000_000);
+
+    let ends_at = client.group_proposal(&proposal_id).voting_ends_at;
+    set_ledger_time(&env, ends_at, 2);
+
+    let result = client.try_group_vote(&member_b, &proposal_id, &true);
+    assert_eq!(
+        result,
+        Err(Ok(Error::OperationExpired)),
+        "voting at/after the window close must fail with OperationExpired",
+    );
+}
+
+/// Execution is rejected until the voting window has closed.
+#[test]
+fn group_execute_before_window_closed_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[member_b.clone()],
+        VOTING_PERIOD,
+    );
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &1_000_000);
+    client.group_vote(&creator, &proposal_id, &true);
+    client.group_vote(&member_b, &proposal_id, &true);
+
+    let result = client.try_group_execute(&creator, &proposal_id);
+    assert_eq!(
+        result,
+        Err(Ok(Error::TimeWindowNotOpen)),
+        "executing before the window closes must fail with TimeWindowNotOpen",
+    );
+}
+
+/// A member cannot vote twice on the same proposal.
+#[test]
+fn group_double_vote_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[member_b.clone()],
+        VOTING_PERIOD,
+    );
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &1_000_000);
+
+    client.group_vote(&creator, &proposal_id, &true);
+    let result = client.try_group_vote(&creator, &proposal_id, &false);
+    assert_eq!(
+        result,
+        Err(Ok(Error::AlreadyVoted)),
+        "a member voting twice must fail with AlreadyVoted",
+    );
+}
+
+/// Only current group members may vote.
+#[test]
+fn group_vote_by_non_member_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[member_b.clone()],
+        VOTING_PERIOD,
+    );
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &1_000_000);
+
+    let result = client.try_group_vote(&outsider, &proposal_id, &true);
+    assert_eq!(
+        result,
+        Err(Ok(Error::NotAMember)),
+        "a non-member vote must fail with NotAMember",
+    );
+}
+
+/// Proposing is rejected while the group is still open.
+#[test]
+fn group_propose_requires_closed_group() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = client.group_create(&creator, &String::from_str(&env, "open-pool"));
+    client.group_set_voting_period(&creator, &group_id, &VOTING_PERIOD);
+    mint(&env, &token, &token_admin, &creator, VOTE_CONTRIB);
+    client.group_contribute(&creator, &group_id, &VOTE_CONTRIB);
+
+    let result = client.try_group_propose(&creator, &group_id, &recipient, &1_000_000);
+    assert_eq!(
+        result,
+        Err(Ok(Error::GroupClosed)),
+        "proposing on an open group must fail with GroupClosed",
+    );
+}
+
+/// Proposing is rejected when no voting period has been configured.
+#[test]
+fn group_propose_without_voting_period_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    // period = 0 disables proposals.
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[],
+        0,
+    );
+
+    let result = client.try_group_propose(&creator, &group_id, &recipient, &1_000_000);
+    assert_eq!(
+        result,
+        Err(Ok(Error::InvalidParameters)),
+        "proposing without a voting period must fail with InvalidParameters",
+    );
+}
+
+/// A proposal cannot be executed twice.
+#[test]
+fn group_execute_twice_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[member_b.clone()],
+        VOTING_PERIOD,
+    );
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &1_000_000);
+    client.group_vote(&creator, &proposal_id, &true);
+    client.group_vote(&member_b, &proposal_id, &true);
+
+    let ends_at = client.group_proposal(&proposal_id).voting_ends_at;
+    set_ledger_time(&env, ends_at + 1, 2);
+
+    assert!(client.group_execute(&creator, &proposal_id));
+    let result = client.try_group_execute(&creator, &proposal_id);
+    assert_eq!(
+        result,
+        Err(Ok(Error::ProposalAlreadyExecuted)),
+        "re-executing a settled proposal must fail with ProposalAlreadyExecuted",
+    );
+}
+
+/// Only the creator may configure the voting period.
+#[test]
+fn group_set_voting_period_by_non_creator_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token) = setup_with_token(&env);
+    let creator = Address::generate(&env);
+    let member_b = Address::generate(&env);
+
+    let group_id = client.group_create(&creator, &String::from_str(&env, "period-pool"));
+    client.group_join(&member_b, &group_id);
+
+    let result = client.try_group_set_voting_period(&member_b, &group_id, &VOTING_PERIOD);
+    assert_eq!(
+        result,
+        Err(Ok(Error::Unauthorized)),
+        "a non-creator setting the voting period must fail with Unauthorized",
+    );
+}
+
+/// `group_propose` emits a `group_proposal_created` event with topics
+/// `(group_proposal_created, proposer, id)` and data `(id, group_id,
+/// recipient, amount, voting_ends_at, timestamp)`.
+#[test]
+fn group_propose_emits_typed_event_with_expected_topic_and_data() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[],
+        VOTING_PERIOD,
+    );
+
+    const SPEND: i128 = 4_000_000;
+    let now = env.ledger().timestamp();
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &SPEND);
+
+    let events = env.events().all();
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = (
+        crate::events::TOPIC_GROUP_PROPOSAL_CREATED,
+        creator.clone(),
+        proposal_id,
+    )
+        .into_val(&env);
+    let decoded_data: (u64, u64, Address, i128, u64, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(
+        decoded_data,
+        (proposal_id, group_id, recipient, SPEND, now + VOTING_PERIOD, now)
+    );
+}
+
+/// `group_vote` emits a `group_vote_cast` event with topics
+/// `(group_vote_cast, voter, id)` and data `(id, group_id, approve,
+/// timestamp)`.
+#[test]
+fn group_vote_emits_typed_event_with_expected_topic_and_data() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[],
+        VOTING_PERIOD,
+    );
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &1_000_000);
+
+    let now = env.ledger().timestamp();
+    client.group_vote(&creator, &proposal_id, &true);
+
+    let events = env.events().all();
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = (
+        crate::events::TOPIC_GROUP_VOTE_CAST,
+        creator.clone(),
+        proposal_id,
+    )
+        .into_val(&env);
+    let decoded_data: (u64, u64, bool, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(decoded_data, (proposal_id, group_id, true, now));
+}
+
+/// `group_execute` emits a `group_proposal_executed` event with topics
+/// `(group_proposal_executed, caller, id)` and data `(id, group_id, passed,
+/// spent, timestamp)`.
+#[test]
+fn group_execute_emits_typed_event_with_expected_topic_and_data() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let creator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    let group_id = closed_group_with_voting(
+        &env,
+        &client,
+        &token,
+        &token_admin,
+        &creator,
+        &[],
+        VOTING_PERIOD,
+    );
+    const SPEND: i128 = 3_000_000;
+    let proposal_id = client.group_propose(&creator, &group_id, &recipient, &SPEND);
+    client.group_vote(&creator, &proposal_id, &true);
+
+    let ends_at = client.group_proposal(&proposal_id).voting_ends_at;
+    set_ledger_time(&env, ends_at + 1, 2);
+
+    let now = env.ledger().timestamp();
+    client.group_execute(&creator, &proposal_id);
+
+    let events = env.events().all();
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> = (
+        crate::events::TOPIC_GROUP_PROPOSAL_EXECUTED,
+        creator.clone(),
+        proposal_id,
+    )
+        .into_val(&env);
+    // A single-member group: 1 yes out of 1 carries the proposal.
+    let decoded_data: (u64, u64, bool, i128, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(decoded_data, (proposal_id, group_id, true, SPEND, now));
+}
+
+// ---------------------------------------------------------------------------
+// Issue #434 — Compound interest
+// ---------------------------------------------------------------------------
+
+const MONTH: u64 = 2_592_000;
+const YEAR: u64 = 31_536_000;
+const INTEREST_PRINCIPAL: i128 = 1_000_000;
+
+/// Configure `rate_bps`/`frequency`, create an interest account for a fresh
+/// owner funded with [`INTEREST_PRINCIPAL`], and return the owner. The
+/// account is opened at the current ledger time (0 unless a test has already
+/// travelled the clock).
+fn setup_interest(
+    env: &Env,
+    client: &SavingsVaultClient,
+    admin: &Address,
+    token: &Address,
+    token_admin: &Address,
+    rate_bps: u32,
+    frequency: CompoundFrequency,
+) -> Address {
+    client.set_interest_rate(admin, &rate_bps);
+    client.set_interest_frequency(admin, &frequency);
+
+    let owner = Address::generate(env);
+    mint(env, token, token_admin, &owner, INTEREST_PRINCIPAL);
+    client.interest_deposit(&owner, &INTEREST_PRINCIPAL);
+    owner
+}
+
+/// A deposit opens an account whose principal is the deposited amount.
+#[test]
+fn interest_deposit_creates_account_with_principal() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    let account = client.interest_account(&owner);
+    assert_eq!(account.owner, owner);
+    assert_eq!(account.principal, INTEREST_PRINCIPAL);
+    assert_eq!(account.rate_bps, 1200);
+    assert_eq!(account.frequency, CompoundFrequency::Monthly);
+    assert_eq!(account.last_compound_at, env.ledger().timestamp());
+}
+
+/// No interest accrues until a whole compounding period has elapsed.
+#[test]
+fn interest_no_accrual_before_a_full_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    set_ledger_time(&env, MONTH - 1, 2);
+    assert_eq!(client.interest_accrued(&owner), 0);
+}
+
+/// One monthly period at 12% annual credits 1% of principal (12% / 12).
+#[test]
+fn interest_accrues_one_monthly_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    set_ledger_time(&env, MONTH, 2);
+    assert_eq!(client.interest_accrued(&owner), 10_000);
+}
+
+/// Interest compounds: two monthly periods at 1% each is 1.0201× the
+/// principal, not 1.02×.
+#[test]
+fn interest_compounds_over_multiple_periods() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    set_ledger_time(&env, 2 * MONTH, 2);
+    assert_eq!(client.interest_accrued(&owner), 20_100);
+}
+
+/// The annual frequency compounds once per year (10% of principal).
+#[test]
+fn interest_accrues_annually() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1000,
+        CompoundFrequency::Annually,
+    );
+
+    set_ledger_time(&env, YEAR, 2);
+    assert_eq!(client.interest_accrued(&owner), 100_000);
+}
+
+/// Claiming credits the accrued interest into the principal; a second claim
+/// before the next period elapses credits nothing.
+#[test]
+fn interest_claim_credits_and_is_idempotent() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    set_ledger_time(&env, MONTH, 2);
+    assert_eq!(client.interest_claim(&owner), 10_000);
+    assert_eq!(client.interest_account(&owner).principal, 1_010_000);
+
+    // No further whole period has elapsed.
+    assert_eq!(client.interest_claim(&owner), 0);
+}
+
+/// Withdrawing settles accrued interest first, so the caller can draw on it.
+#[test]
+fn interest_withdraw_draws_on_accrued_interest() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    set_ledger_time(&env, MONTH, 2);
+    // Settled principal is 1_010_000; withdraw more than the original deposit.
+    client.interest_withdraw(&owner, &1_005_000);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&owner), 1_005_000);
+    assert_eq!(client.interest_account(&owner).principal, 5_000);
+}
+
+/// Withdrawing beyond the settled principal fails.
+#[test]
+fn interest_withdraw_exceeding_principal_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    assert_eq!(
+        client.try_interest_withdraw(&owner, &(INTEREST_PRINCIPAL + 1)),
+        Err(Ok(Error::InsufficientBalance)),
+    );
+}
+
+#[test]
+fn interest_deposit_rejects_non_positive_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _token) = setup_with_token(&env);
+    let owner = Address::generate(&env);
+
+    assert_eq!(
+        client.try_interest_deposit(&owner, &0),
+        Err(Ok(Error::InvalidAmount)),
+    );
+}
+
+#[test]
+fn interest_unknown_account_not_found() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _token) = setup_with_token(&env);
+    let stranger = Address::generate(&env);
+
+    assert_eq!(
+        client.try_interest_account(&stranger),
+        Err(Ok(Error::NotFound)),
+    );
+    assert_eq!(
+        client.try_interest_withdraw(&stranger, &1_000),
+        Err(Ok(Error::NotFound)),
+    );
+    assert_eq!(
+        client.try_interest_claim(&stranger),
+        Err(Ok(Error::NotFound)),
+    );
+    assert_eq!(
+        client.try_interest_accrued(&stranger),
+        Err(Ok(Error::NotFound)),
+    );
+}
+
+/// A rate change does not re-price time that accrued under the old rate: the
+/// account settles at its snapshot, then adopts the new rate.
+#[test]
+fn interest_rate_change_does_not_repricing_accrued_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    set_ledger_time(&env, MONTH, 2);
+    // Raise the rate after the period elapsed but before the account is
+    // touched; the accrued period must still be priced at 12% annual.
+    client.set_interest_rate(&admin, &2400);
+
+    assert_eq!(client.interest_claim(&owner), 10_000);
+    assert_eq!(client.interest_account(&owner).rate_bps, 2400);
+}
+
+#[test]
+fn set_interest_rate_requires_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, _token) = setup_with_token(&env);
+    let not_admin = Address::generate(&env);
+
+    assert_eq!(
+        client.try_set_interest_rate(&not_admin, &100),
+        Err(Ok(Error::Unauthorized)),
+    );
+}
+
+#[test]
+fn set_interest_rate_above_max_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _token) = setup_with_token(&env);
+
+    assert_eq!(
+        client.try_set_interest_rate(&admin, &10_001),
+        Err(Ok(Error::InvalidParameters)),
+    );
+}
+
+#[test]
+fn interest_frequency_round_trip_and_default() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _token) = setup_with_token(&env);
+
+    // Defaults to annual compounding before any configuration.
+    assert_eq!(client.interest_frequency(), CompoundFrequency::Annually);
+    assert_eq!(client.interest_rate_bps(), 0);
+
+    client.set_interest_frequency(&admin, &CompoundFrequency::Daily);
+    assert_eq!(client.interest_frequency(), CompoundFrequency::Daily);
+}
+
+/// A claim emits `interest_claimed` with the credited amount and new balance.
+#[test]
+fn interest_claim_emits_typed_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+
+    let owner = setup_interest(
+        &env,
+        &client,
+        &admin,
+        &token,
+        &token_admin,
+        1200,
+        CompoundFrequency::Monthly,
+    );
+
+    set_ledger_time(&env, MONTH, 2);
+    client.interest_claim(&owner);
+
+    let events = env.events().all();
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (crate::events::TOPIC_INTEREST_CLAIMED, owner.clone()).into_val(&env);
+    let decoded_data: (Address, i128, i128, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(decoded_data, (owner, 10_000, 1_010_000, MONTH));
+}
+
+/// A deposit emits `interest_deposit` with the amount and resulting principal.
+#[test]
+fn interest_deposit_emits_typed_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _admin, token) = setup_with_token(&env);
+    let token_admin = Address::generate(&env);
+    let owner = Address::generate(&env);
+    mint(&env, &token, &token_admin, &owner, INTEREST_PRINCIPAL);
+
+    client.interest_deposit(&owner, &INTEREST_PRINCIPAL);
+
+    let events = env.events().all();
+    let (contract_id, topics, data) = events.last().unwrap().clone();
+
+    let expected_topics: soroban_sdk::Vec<soroban_sdk::Val> =
+        (crate::events::TOPIC_INTEREST_DEPOSIT, owner.clone()).into_val(&env);
+    let decoded_data: (Address, i128, i128, u64) =
+        soroban_sdk::TryFromVal::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(contract_id, client.address);
+    assert_eq!(topics, expected_topics);
+    assert_eq!(
+        decoded_data,
+        (owner, INTEREST_PRINCIPAL, INTEREST_PRINCIPAL, 0)
     );
 }
 

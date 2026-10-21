@@ -15,6 +15,9 @@ import { ApiKeyController } from './api-key.controller';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { AuthAuditEvent } from './entities/auth-audit-event.entity';
 import { WebAuthnCredential } from './entities/webauthn-credential.entity';
+import { OAuthIdentity } from './entities/oauth-identity.entity';
+import { OAuthTransaction } from './entities/oauth-transaction.entity';
+import { OAuthService } from './oauth.service';
 
 @Module({
   imports: [
@@ -27,6 +30,8 @@ import { WebAuthnCredential } from './entities/webauthn-credential.entity';
       RefreshToken,
       AuthAuditEvent,
       WebAuthnCredential,
+      OAuthIdentity,
+      OAuthTransaction,
     ]),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -40,7 +45,13 @@ import { WebAuthnCredential } from './entities/webauthn-credential.entity';
     }),
   ],
   controllers: [AuthController, ApiKeyController],
-  providers: [AuthService, ApiKeyService, JwtStrategy, RateLimitService],
-  exports: [AuthService, ApiKeyService, JwtModule],
+  providers: [
+    AuthService,
+    ApiKeyService,
+    JwtStrategy,
+    RateLimitService,
+    OAuthService,
+  ],
+  exports: [AuthService, ApiKeyService, JwtModule, OAuthService],
 })
 export class AuthModule {}

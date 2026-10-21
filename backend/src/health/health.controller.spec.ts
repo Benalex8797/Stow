@@ -10,6 +10,8 @@ describe('HealthController', () => {
   let controller: HealthController;
   let healthService: {
     checkHealth: jest.Mock;
+    checkLiveness: jest.Mock;
+    checkReadiness: jest.Mock;
     checkPing: jest.Mock;
     checkDetailed: jest.Mock;
   };
@@ -17,6 +19,12 @@ describe('HealthController', () => {
   beforeEach(async () => {
     healthService = {
       checkHealth: jest.fn(),
+      checkLiveness: jest.fn().mockReturnValue({
+        status: 'ok',
+        type: 'liveness',
+        timestamp: new Date().toISOString(),
+      }),
+      checkReadiness: jest.fn(),
       checkPing: jest.fn().mockReturnValue({
         status: 'ok',
         type: 'ping',
@@ -31,6 +39,56 @@ describe('HealthController', () => {
     }).compile();
 
     controller = module.get<HealthController>(HealthController);
+  });
+
+  describe('checkLiveness', () => {
+    it('delegates to the liveness probe', () => {
+      const result = controller.checkLiveness();
+
+      expect(result).toEqual(
+        expect.objectContaining({ status: 'ok', type: 'liveness' }),
+      );
+      expect(healthService.checkLiveness).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('checkReadiness', () => {
+    it('delegates to the readiness probe', async () => {
+      const readinessResult = {
+        status: 'ok',
+        details: { database: { status: 'up' } },
+      };
+      healthService.checkReadiness.mockResolvedValue(readinessResult);
+
+      await expect(controller.checkReadiness()).resolves.toEqual(
+        readinessResult,
+      );
+      expect(healthService.checkReadiness).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('checkDependencies', () => {
+    it('requests detailed dependency status', async () => {
+      const dependencyStatus = {
+        status: 'degraded',
+        database: { status: 'up', latency_ms: 3 },
+        soroban: { status: 'down', latency_ms: 5000 },
+        cache: { status: 'up', latency_ms: 1 },
+        indexer: {
+          status: 'up',
+          lag_ledgers: 1,
+          last_processed_ledger: 10,
+          latest_contract_ledger: 11,
+        },
+        uptime_seconds: 42,
+      };
+      healthService.checkDetailed.mockResolvedValue(dependencyStatus);
+
+      await expect(controller.checkDependencies()).resolves.toEqual(
+        dependencyStatus,
+      );
+      expect(healthService.checkDetailed).toHaveBeenCalledWith(true);
+    });
   });
 
   describe('check', () => {

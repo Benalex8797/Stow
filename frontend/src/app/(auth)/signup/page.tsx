@@ -100,6 +100,10 @@ export default function SignupPage() {
             Connect your Stellar wallet to create an account, then set up a
             passkey so you can skip wallet-signing next time.
           </p>
+          <p className="mt-2 text-xs leading-relaxed text-muted">
+            You can link Google, Apple, or GitHub sign-in to your wallet
+            account later from Settings.
+          </p>
 
           {!passkeysSupported && status !== "error" && (
             <div
