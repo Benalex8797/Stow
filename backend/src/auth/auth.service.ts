@@ -161,6 +161,13 @@ export class AuthService implements OnModuleInit {
       signed_challenge,
     );
 
+    const session = await this.createSession(user);
+    return { ...session, user, is_new_user };
+  }
+
+  async createSession(
+    user: User,
+  ): Promise<{ access_token: string; refresh_token: string }> {
     // Sign JWT with sub: user.id
     const payload = { sub: user.id, stellar_address: user.stellar_address };
     const access_token = await this.jwtService.signAsync(payload);
@@ -172,7 +179,7 @@ export class AuthService implements OnModuleInit {
       familyId,
     );
 
-    return { access_token, refresh_token, user, is_new_user };
+    return { access_token, refresh_token };
   }
 
   /** sha256 hex digest — fast, deterministic lookup key for a raw refresh token. */

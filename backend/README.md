@@ -86,6 +86,13 @@ DATABASE_URL=postgresql://stow:stow@localhost:5432/stow pnpm run migration:run
 | `STELLAR_NETWORK`     | `testnet` or `mainnet`            |
 | `SOROBAN_CONTRACT_ID` | Deployed contract ID              |
 | `PORT`                | Server port (default `3000`)      |
+| `FRONTEND_URL`        | Default allowed browser origin    |
+| `CORS_ORIGINS`        | Optional comma-separated browser origin allowlist; overrides `FRONTEND_URL` |
+
+CORS allows credentialed requests from the configured origins. The Nest/Express
+CORS middleware answers preflight `OPTIONS` requests and permits the API's
+authorization, API key, content type, and idempotency headers. Do not set an
+origin to `*` while credentials are enabled.
 
 ---
 
@@ -146,6 +153,45 @@ curl http://localhost:3000/api/v1/health
 ```
 
 Returns `200 OK` when the service, database, and disk are healthy. Returns `503` otherwise.
+
+Container orchestrators can use separate probes:
+
+```bash
+curl http://localhost:3000/api/v1/health/live
+curl http://localhost:3000/api/v1/health/ready
+curl http://localhost:3000/api/v1/health/dependencies
+```
+
+`/health/live` only verifies that the process is responding. `/health/ready`
+checks PostgreSQL, the critical dependency for serving API requests, and returns
+`503` when it is unavailable. `/health/dependencies` reports status and latency
+for PostgreSQL, Soroban RPC, the cache, and the indexer; non-critical dependency
+failures are reported as degraded without failing readiness.
+
+## Social Sign-In
+
+Google, Apple, and GitHub sign-in are optional. Configure provider credentials
+in the backend environment and register this callback URL with each provider:
+`https://<your-api-host>/api/v1/auth/oauth/callback`. Set `FRONTEND_URL` to the
+frontend origin and `OAUTH_CALLBACK_URL` to that exact registered callback.
+Apple also requires its Services ID, Team ID, Key ID, and `.p8` private key;
+write private-key line breaks as `\n` in the environment.
+
+Run the database migration before enabling these providers:
+
+```bash
+pnpm run migration:run
+```
+
+Social identities are never automatically matched by email. A user must first
+sign in with their Stellar wallet or passkey and link each provider from
+**Settings**. OAuth state is single-use and persisted; the callback returns a
+short-lived, single-use exchange code rather than putting session tokens in the
+redirect URL. The code exchange is bound to a random verifier retained only in
+the initiating browser tab, protecting sign-in from copied callback URLs. Set
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`,
+`GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`, or the corresponding Apple
+settings to expose each provider.
 
 ---
 

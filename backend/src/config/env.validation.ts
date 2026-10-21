@@ -201,6 +201,55 @@ class EnvironmentVariables {
   @IsOptional()
   @IsNumber()
   ODDS_THROTTLE_MS?: number;
+
+  @IsOptional()
+  @IsString()
+  BACKEND_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  FRONTEND_URL?: string;
+
+  /** Comma-separated browser origins allowed to call the API. */
+  @IsOptional()
+  @IsString()
+  CORS_ORIGINS?: string;
+
+  @IsOptional()
+  @IsString()
+  OAUTH_CALLBACK_URL?: string;
+
+  @IsOptional()
+  @IsString()
+  GOOGLE_CLIENT_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  GOOGLE_CLIENT_SECRET?: string;
+
+  @IsOptional()
+  @IsString()
+  APPLE_CLIENT_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  APPLE_TEAM_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  APPLE_KEY_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  APPLE_PRIVATE_KEY?: string;
+
+  @IsOptional()
+  @IsString()
+  GITHUB_CLIENT_ID?: string;
+
+  @IsOptional()
+  @IsString()
+  GITHUB_CLIENT_SECRET?: string;
 }
 
 export function validate(config: Record<string, unknown>) {

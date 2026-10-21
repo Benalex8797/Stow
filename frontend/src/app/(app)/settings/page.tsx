@@ -5,6 +5,8 @@ import { apiFetch, ApiError } from "@/lib/api";
 import ErrorRetry from "@/components/ui/ErrorRetry";
 import AppearanceSettings from "@/components/settings/AppearanceSettings";
 import BiometricAccessSettings from "@/components/settings/BiometricAccessSettings";
+import OAuthAccountsSettings from "@/components/settings/OAuthAccountsSettings";
+import ApiKeysSettings from "@/components/settings/ApiKeysSettings";
 import { useSession } from "@/context/SessionProvider";
 import { Settings, Bell, BellOff, Clock, Loader2 } from "lucide-react";
 
@@ -190,6 +192,14 @@ export default function SettingsPage() {
         {user && (
           <div className="mb-6">
             <BiometricAccessSettings userId={user.id} />
+          </div>
+        )}
+
+        {user && <OAuthAccountsSettings />}
+
+        {user && (
+          <div className="mb-8">
+            <ApiKeysSettings />
           </div>
         )}
 

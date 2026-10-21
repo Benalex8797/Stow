@@ -25,6 +25,45 @@ export class HealthController {
     return this.healthService.checkHealth();
   }
 
+  @Get('live')
+  @Public()
+  @ApiOperation({ summary: 'Liveness probe' })
+  @ApiResponse({
+    status: 200,
+    description: 'The application process is running',
+  })
+  checkLiveness() {
+    return this.healthService.checkLiveness();
+  }
+
+  @Get('ready')
+  @Public()
+  @ApiOperation({ summary: 'Readiness probe' })
+  @ApiResponse({
+    status: 200,
+    description: 'The application is ready to serve requests',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'A required dependency is unavailable',
+  })
+  checkReadiness(): Promise<HealthCheckResult> {
+    return this.healthService.checkReadiness();
+  }
+
+  @Get('dependencies')
+  @Public()
+  @ApiOperation({ summary: 'Health status of application dependencies' })
+  @ApiResponse({
+    status: 200,
+    description:
+      'Dependency status and latency for the database, Soroban RPC, cache, and indexer',
+    type: DetailedHealthDto,
+  })
+  checkDependencies(): Promise<DetailedHealthDto | HealthSummaryDto> {
+    return this.healthService.checkDetailed(true);
+  }
+
   @Get('ping')
   @Public()
   @ApiOperation({ summary: 'Simple ping check (used by health check)' })

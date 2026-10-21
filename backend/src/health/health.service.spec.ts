@@ -19,6 +19,14 @@ describe('HealthService', () => {
     get: jest.fn(),
   };
 
+  const mockHealth = {
+    check: jest.fn(),
+  };
+
+  const mockDbIndicator = {
+    pingCheck: jest.fn(),
+  };
+
   const mockDataSource = {
     query: jest.fn(),
   };
@@ -33,7 +41,7 @@ describe('HealthService', () => {
         HealthService,
         {
           provide: HealthCheckService,
-          useValue: { check: jest.fn() },
+          useValue: mockHealth,
         },
         {
           provide: HttpHealthIndicator,
@@ -41,7 +49,7 @@ describe('HealthService', () => {
         },
         {
           provide: TypeOrmHealthIndicator,
-          useValue: { pingCheck: jest.fn() },
+          useValue: mockDbIndicator,
         },
         {
           provide: DiskHealthIndicator,
@@ -68,6 +76,37 @@ describe('HealthService', () => {
 
   it('should be defined', () => {
     expect(service).toBeDefined();
+  });
+
+  describe('checkLiveness', () => {
+    it('reports the process as alive without checking dependencies', () => {
+      expect(service.checkLiveness()).toEqual(
+        expect.objectContaining({ status: 'ok', type: 'liveness' }),
+      );
+      expect(mockHealth.check).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('checkReadiness', () => {
+    it('checks the critical database dependency', async () => {
+      const readinessResult = {
+        status: 'ok' as const,
+        details: { database: { status: 'up' } },
+      };
+      mockHealth.check.mockResolvedValue(readinessResult);
+      mockDbIndicator.pingCheck.mockResolvedValue({
+        database: { status: 'up' },
+      });
+
+      await expect(service.checkReadiness()).resolves.toEqual(readinessResult);
+      expect(mockHealth.check).toHaveBeenCalledTimes(1);
+
+      const [databaseCheck] = mockHealth.check.mock.calls[0][0];
+      await databaseCheck();
+      expect(mockDbIndicator.pingCheck).toHaveBeenCalledWith('database', {
+        connection: mockDataSource,
+      });
+    });
   });
 
   describe('checkDetailed', () => {

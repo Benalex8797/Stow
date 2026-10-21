@@ -69,6 +69,22 @@ export class HealthService {
     ]);
   }
 
+  /** Liveness only reports whether the application process can serve HTTP. */
+  checkLiveness() {
+    return {
+      status: 'ok',
+      type: 'liveness',
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  /** Readiness depends on PostgreSQL, the critical dependency for API requests. */
+  checkReadiness(): Promise<HealthCheckResult> {
+    return this.health.check([
+      () => this.db.pingCheck('database', { connection: this.dataSource }),
+    ]);
+  }
+
   /**
    * Simple endpoint for HTTP health check (no recursion)
    * Used by the main health check to ping the service
