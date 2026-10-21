@@ -10,29 +10,32 @@
 //!
 //! - **Instance storage** — attached to the contract instance itself. Used
 //!   for small, hot, singleton values that are read on nearly every call:
-//!   `Token`, `Admin`, `DepositCap`, `Config`, and the `Next*Id` counters.
+//!   `Token`, `Admin`, `DepositCap`, `Config`, `InterestRateBps`,
+//!   `InterestFrequency`, and the `Next*Id` counters.
 //!   Cheapest option for this shape of data, and its TTL is bumped as a
 //!   single unit by [`extend_instance_ttl`], called at the top of every
 //!   state-changing entrypoint — so as long as the contract sees any
 //!   mutating traffic within the bump window, none of these values expire.
 //! - **Persistent storage** — one entry per record, for unbounded
-//!   collections keyed by user or id: `Flexible(Address)`, `Locked(u64)`,
-//!   `Goal(u64)`, `Group(u64)`. These do **not** share a TTL with the
+//!   collections keyed by user or id: `Flexible(Address)`,
+//!   `InterestAccount(Address)`, `Locked(u64)`, `Goal(u64)`, `Group(u64)`.
+//!   These do **not** share a TTL with the
 //!   instance; each entry's TTL is refreshed only when that specific entry
 //!   is written. A record that is never touched again (e.g. a flexible
 //!   account drained to zero and abandoned) will eventually hit its
 //!   minimum persistent TTL and become eligible for archival by the
 //!   network; reading an archived entry then requires a `restore` before
-//!   the next `get`. [`extend_persistent_ttl`] is called after every read
-//!   and write of a `Flexible`, `Locked`, `Goal`, or `Group` record so a
-//!   record touched within the bump window never expires.
+//! the next `get`. [`extend_persistent_ttl`] is called after every read
+//! and write of a `Flexible`, `InterestAccount`, `Locked`, `Goal`, or
+//! `Group` record so a record touched within the bump window never expires.
 //!
 //! ## TTL policy
 //!
 //! [`INSTANCE_BUMP_AMOUNT`] / [`INSTANCE_LIFETIME_THRESHOLD`] control the
 //! instance TTL. [`PERSISTENT_BUMP_AMOUNT`] / [`PERSISTENT_LIFETIME_THRESHOLD`]
 //! control persistent per-entry TTLs via [`extend_persistent_ttl`], called
-//! on every read and write of an `Account`/`Plan`/`Goal`/`Group` record.
+//! on every read and write of a `Flexible`/`InterestAccount`/`Locked`/
+//! `Goal`/`Group` record.
 //!
 //! ## Storage cost for large groups
 //!
@@ -75,8 +78,8 @@ pub fn extend_instance_ttl(env: &Env) {
 }
 
 /// Bump a persistent entry's TTL. Call after every read and write of a
-/// `Flexible`, `Locked`, `Goal`, or `Group` record so it does not become
-/// eligible for archival between touches.
+/// `Flexible`, `InterestAccount`, `Locked`, `Goal`, or `Group` record so it
+/// does not become eligible for archival between touches.
 pub fn extend_persistent_ttl(env: &Env, key: &DataKey) {
     env.storage().persistent().extend_ttl(
         key,
