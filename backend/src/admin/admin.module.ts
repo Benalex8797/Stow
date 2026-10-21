@@ -12,7 +12,7 @@ import { AdminAuditLog } from './entities/admin-audit-log.entity';
 import { AdminAuditInterceptor } from './interceptors/admin-audit.interceptor';
 import { ContractEvent } from '../indexer/entities/contract-event.entity';
 import { SorobanModule } from '../soroban/soroban.module';
-import { ReferralModule } from '../referral/referral.module';
+import { CsvImportService } from './csv-import.service';
 
 @Module({
   imports: [
@@ -29,7 +29,7 @@ import { ReferralModule } from '../referral/referral.module';
     ReferralModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService, AuditLogService, AdminAuditInterceptor],
-  exports: [AdminService, AuditLogService],
+  providers: [AdminService, AdminAuditInterceptor, CsvImportService],
+  exports: [AdminService, CsvImportService],
 })
 export class AdminModule {}

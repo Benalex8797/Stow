@@ -12,6 +12,7 @@ import {
 } from './dto/passkey-registration.dto';
 import { WebAuthnCredential } from './entities/webauthn-credential.entity';
 import { RateLimitService } from './rate-limit.service';
+import { OAuthService } from './oauth.service';
 
 const mockAuthService = () => ({
   generateChallenge: jest
@@ -36,8 +37,20 @@ describe('AuthController', () => {
   let controller: AuthController;
   let authService: ReturnType<typeof mockAuthService>;
   let configService: ReturnType<typeof mockConfigService>;
+  let oauthService: Record<string, jest.Mock>;
 
   beforeEach(async () => {
+    oauthService = {
+      availableProviders: jest.fn().mockReturnValue([]),
+      linkedProviders: jest.fn().mockResolvedValue([]),
+      beginLogin: jest.fn(),
+      beginLink: jest.fn(),
+      providerForState: jest.fn().mockResolvedValue('google'),
+      completeCallback: jest.fn(),
+      completeProviderError: jest.fn(),
+      callbackFailureForState: jest.fn(),
+      exchangeCode: jest.fn(),
+    };
     const module: TestingModule = await Test.createTestingModule({
       controllers: [AuthController],
       providers: [
@@ -47,12 +60,52 @@ describe('AuthController', () => {
           useValue: { getStatus: jest.fn() },
         },
         { provide: ConfigService, useValue: mockConfigService() },
+        {
+          provide: OAuthService,
+          useValue: oauthService,
+        },
       ],
     }).compile();
 
     controller = module.get<AuthController>(AuthController);
     authService = module.get(AuthService);
     configService = module.get(ConfigService);
+  });
+
+  describe('OAuth sign-in', () => {
+    it('starts sign-in with the browser verifier and safe return path', async () => {
+      const dto = {
+        client_verifier: 'a'.repeat(64),
+        return_to: '/settings',
+      };
+      oauthService.beginLogin.mockResolvedValue(
+        'https://accounts.google.com/o/oauth2/v2/auth',
+      );
+
+      await expect(controller.startOAuthLogin('google', dto)).resolves.toEqual({
+        authorization_url: 'https://accounts.google.com/o/oauth2/v2/auth',
+      });
+      expect(oauthService.beginLogin).toHaveBeenCalledWith(
+        'google',
+        dto.client_verifier,
+        dto.return_to,
+      );
+    });
+
+    it('passes the browser verifier when exchanging the one-time code', async () => {
+      const dto = {
+        code: 'single-use-code',
+        code_verifier: 'a'.repeat(64),
+      };
+      oauthService.exchangeCode.mockResolvedValue({ access_token: 'token' });
+
+      await controller.exchangeOAuthCode(dto);
+
+      expect(oauthService.exchangeCode).toHaveBeenCalledWith(
+        dto.code,
+        dto.code_verifier,
+      );
+    });
   });
 
   describe('generateChallenge', () => {

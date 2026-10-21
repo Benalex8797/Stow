@@ -19,6 +19,8 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { APP_GUARD, Reflector } from '@nestjs/core';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RateLimitService } from './rate-limit.service';
+import { OAuthService } from './oauth.service';
+import { WebAuthnCredential } from './entities/webauthn-credential.entity';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 
 const sign = (kp: Keypair, text: string): string =>
@@ -132,6 +134,20 @@ describe('Auth E2E — challenge → verify flow', () => {
           },
         },
         {
+          provide: OAuthService,
+          useValue: {
+            availableProviders: jest.fn().mockReturnValue([]),
+            linkedProviders: jest.fn().mockResolvedValue([]),
+            beginLogin: jest.fn(),
+            beginLink: jest.fn(),
+            providerForState: jest.fn().mockResolvedValue('google'),
+            completeCallback: jest.fn(),
+            completeProviderError: jest.fn(),
+            callbackFailureForState: jest.fn(),
+            exchangeCode: jest.fn(),
+          },
+        },
+        {
           provide: ConfigService,
           useValue: {
             get: jest.fn((key: string) => {
@@ -160,6 +176,10 @@ describe('Auth E2E — challenge → verify flow', () => {
         {
           provide: getRepositoryToken(AuthAuditEvent),
           useValue: mockAuthAuditEventRepository,
+        },
+        {
+          provide: getRepositoryToken(WebAuthnCredential),
+          useValue: {},
         },
       ],
     })
@@ -552,6 +572,20 @@ describe('POST /auth/verify — rate limiting', () => {
         {
           provide: ConfigService,
           useValue: { get: jest.fn() },
+        },
+        {
+          provide: OAuthService,
+          useValue: {
+            availableProviders: jest.fn().mockReturnValue([]),
+            linkedProviders: jest.fn().mockResolvedValue([]),
+            beginLogin: jest.fn(),
+            beginLink: jest.fn(),
+            providerForState: jest.fn().mockResolvedValue('google'),
+            completeCallback: jest.fn(),
+            completeProviderError: jest.fn(),
+            callbackFailureForState: jest.fn(),
+            exchangeCode: jest.fn(),
+          },
         },
       ],
     })

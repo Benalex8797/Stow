@@ -91,6 +91,10 @@ pub enum Error {
     InsufficientGroupFunds = 55,
     /// Member already exists in group.
     MemberAlreadyExists = 56,
+    /// The caller has already voted on this proposal.
+    AlreadyVoted = 57,
+    /// The proposal has already been executed.
+    ProposalAlreadyExecuted = 58,
 
     // --- Arithmetic & Limits (60-69) ---
     /// A monetary computation would have overflowed or underflowed `i128`.
@@ -203,6 +207,8 @@ impl Error {
             Error::InvalidPayoutSchedule => "Group payout schedule is invalid",
             Error::InsufficientGroupFunds => "Group has insufficient funds for payout",
             Error::MemberAlreadyExists => "Member already exists in group",
+            Error::AlreadyVoted => "Caller has already voted on this proposal",
+            Error::ProposalAlreadyExecuted => "The proposal has already been executed",
             
             // Arithmetic & Limits
             Error::Overflow => "Arithmetic operation would overflow or underflow",
@@ -282,7 +288,9 @@ impl Error {
             | Error::GroupFull 
             | Error::InvalidPayoutSchedule 
             | Error::InsufficientGroupFunds 
-            | Error::MemberAlreadyExists => "GroupSavings",
+            | Error::MemberAlreadyExists 
+            | Error::AlreadyVoted 
+            | Error::ProposalAlreadyExecuted => "GroupSavings",
             
             Error::Overflow 
             | Error::DepositCapExceeded 

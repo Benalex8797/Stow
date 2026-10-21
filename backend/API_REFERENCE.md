@@ -2868,6 +2868,55 @@ Example curl:
 curl http://localhost:3000/api/v1/health
 ```
 
+### `GET /health/live`
+One-line description: Verify that the application process is responding.
+
+Auth required: No
+
+Success response:
+- `200 OK`
+```json
+{
+  "status": "ok",
+  "type": "liveness",
+  "timestamp": "2026-10-20T14:45:00.000Z"
+}
+```
+
+Example curl:
+```bash
+curl http://localhost:3000/api/v1/health/live
+```
+
+### `GET /health/ready`
+One-line description: Verify that the application can serve requests.
+
+Auth required: No
+
+Success response:
+- `200 OK` when PostgreSQL is reachable
+
+Error responses:
+- `503` when PostgreSQL is unavailable
+
+Example curl:
+```bash
+curl http://localhost:3000/api/v1/health/ready
+```
+
+### `GET /health/dependencies`
+One-line description: Report health and latency for PostgreSQL, Soroban RPC, cache, and indexer.
+
+Auth required: No
+
+Success response:
+- `200 OK` with an overall `healthy`, `degraded`, or `down` status and per-dependency details
+
+Example curl:
+```bash
+curl http://localhost:3000/api/v1/health/dependencies
+```
+
 ### `GET /health/ping`
 One-line description: Perform a simple ping check.
 
@@ -2921,6 +2970,62 @@ Error responses:
 Example curl:
 ```bash
 curl http://localhost:3000/api/v1/health/detailed
+```
+
+---
+
+## Social Authentication
+
+### `GET /auth/oauth/providers`
+List social providers configured on the backend. Public.
+
+### `POST /auth/oauth/{provider}/start`
+Begin sign-in with `google`, `apple`, or `github`. After provider authentication,
+the identity must already be linked to an existing Stow wallet account.
+Unlinked identities are not automatically attached by matching email.
+
+Required JSON field: `client_verifier`, a browser-generated verifier that
+binds the subsequent one-time code exchange to the initiating browser tab.
+Optional JSON field: `return_to`, restricted to a local application path.
+
+The response contains an `authorization_url` for the provider authorization
+page.
+
+### `POST /auth/oauth/{provider}/link/start`
+Begin linking a provider to the authenticated user's wallet account.
+
+Auth required: Yes
+
+Example request:
+```http
+POST /api/v1/auth/oauth/google/link/start
+Authorization: Bearer <access-token>
+Content-Type: application/json
+
+{ "client_verifier": "<browser-generated-verifier>" }
+```
+
+Returns an `authorization_url` for the provider authorization page. The
+provider callback must exactly match `OAUTH_CALLBACK_URL`.
+
+### `GET /auth/oauth/identities`
+List providers linked to the authenticated user's account.
+
+Auth required: Yes
+
+### `POST /auth/oauth/exchange`
+Exchange the short-lived, single-use code from the sign-in callback for a
+Stow access token, refresh token, and user. OAuth credentials and provider
+tokens are never returned to the browser.
+
+Auth required: No
+
+Example request:
+```json
+{
+  "code": "<single-use-oauth-code>",
+  "code_verifier": "<same-browser-generated-verifier>"
+}
 ```
 
 ---

@@ -25,8 +25,14 @@ import { WebhooksModule } from './webhooks/webhooks.module';
 import { AccountModule } from './account/account.module';
 import { SavingsModule } from './savings/savings.module';
 import { ActivityModule } from './activity/activity.module';
+import { NftRewardsModule } from './nft-rewards/nft-rewards.module';
+import { InterestRatesModule } from './interest-rates/interest-rates.module';
+import { RoundupModule } from './savings-roundup/roundup.module';
 import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
-import { ReferralModule } from './referral/referral.module';
+import { BackupModule } from './backup/backup.module';
+import { AnchorModule } from './anchor/anchor.module';
+import { CsvImportModule } from './csv-import/csv-import.module';
+import { GraphqlApiModule } from './graphql/graphql.module';
 
 @Module({
   imports: [
@@ -105,7 +111,10 @@ import { ReferralModule } from './referral/referral.module';
     AccountModule,
     SavingsModule,
     ActivityModule,
-    ReferralModule,
+    BackupModule,
+    AnchorModule,
+    CsvImportModule,
+    GraphqlApiModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

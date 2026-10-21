@@ -1,5 +1,6 @@
 import { VersioningType } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
@@ -16,6 +17,35 @@ async function bootstrap() {
     rawBody: true,
   });
   app.useLogger(app.get(Logger));
+
+  // Credentials cannot be used with a wildcard origin. Keep the allowlist
+  // explicit and configurable for local, staging, and production frontends.
+  const corsConfig = app.get(ConfigService);
+  const corsOrigins = (
+    corsConfig.get<string>('CORS_ORIGINS') ??
+    corsConfig.get<string>('FRONTEND_URL') ??
+    ''
+  )
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+  if (corsOrigins.includes('*')) {
+    throw new Error('CORS_ORIGINS cannot include "*" when credentials are enabled');
+  }
+
+  app.enableCors({
+    origin: corsOrigins,
+    credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'X-API-Key',
+      'Idempotency-Key',
+    ],
+    maxAge: 86400,
+  });
 
   // Enable URI-based versioning
   app.enableVersioning({

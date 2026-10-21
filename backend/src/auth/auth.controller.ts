@@ -1,11 +1,18 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Get,
   HttpCode,
+  HttpException,
   HttpStatus,
+  Logger,
+  Param,
   Post,
+  Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { AuthService } from './auth.service';
 import { RateLimitService } from './rate-limit.service';
 import { GenerateChallengeDto } from './dto/generate-challenge.dto';
@@ -32,6 +39,9 @@ import { Public } from '../common/decorators/public.decorator';
 import { User } from '../users/entities/user.entity';
 import { ConfigService } from '@nestjs/config';
 import { ThrottleTier } from '../common/decorators/throttle-tier.decorator';
+import { OAuthService, OAUTH_PROVIDERS, OAuthProvider } from './oauth.service';
+import { OAuthExchangeDto } from './dto/oauth-exchange.dto';
+import { OAuthStartDto } from './dto/oauth-start.dto';
 
 @ApiTags('Auth')
 @ThrottleTier('auth')
@@ -41,7 +51,109 @@ export class AuthController {
     private readonly authService: AuthService,
     private readonly rateLimitService: RateLimitService,
     private readonly configService: ConfigService,
+    private readonly oauthService: OAuthService,
   ) {}
+
+  private readonly logger = new Logger(AuthController.name);
+
+  @Public()
+  @Get('oauth/providers')
+  @ApiOperation({ summary: 'List configured social sign-in providers' })
+  getOAuthProviders(): { providers: OAuthProvider[] } {
+    return { providers: this.oauthService.availableProviders() };
+  }
+
+  @Public()
+  @Post('oauth/:provider/start')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Start social sign-in' })
+  async startOAuthLogin(
+    @Param('provider') provider: string,
+    @Body() dto: OAuthStartDto,
+  ): Promise<{ authorization_url: string }> {
+    return {
+      authorization_url: await this.oauthService.beginLogin(
+        this.parseOAuthProvider(provider),
+        dto.client_verifier,
+        dto.return_to,
+      ),
+    };
+  }
+
+  @Post('oauth/:provider/link/start')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Start linking a social account to this account' })
+  async startOAuthLink(
+    @Param('provider') provider: string,
+    @CurrentUser() user: User,
+    @Body() dto: OAuthStartDto,
+  ): Promise<{ authorization_url: string }> {
+    return {
+      authorization_url: await this.oauthService.beginLink(
+        this.parseOAuthProvider(provider),
+        user.id,
+        dto.client_verifier,
+      ),
+    };
+  }
+
+  @Get('oauth/identities')
+  @ApiOperation({ summary: 'List linked social sign-in providers' })
+  @ApiBearerAuth()
+  async getOAuthIdentities(
+    @CurrentUser() user: User,
+  ): Promise<{ providers: OAuthProvider[] }> {
+    return { providers: await this.oauthService.linkedProviders(user.id) };
+  }
+
+  @Public()
+  @Post('oauth/exchange')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Exchange a one-time social sign-in code for a session',
+  })
+  async exchangeOAuthCode(@Body() dto: OAuthExchangeDto) {
+    return this.oauthService.exchangeCode(dto.code, dto.code_verifier);
+  }
+
+  @Public()
+  @Get('oauth/callback')
+  @ApiOperation({
+    summary: 'Complete a social sign-in or account-link callback',
+  })
+  async oauthCallback(
+    @Query('state') state: string,
+    @Query('code') code: string,
+    @Query('error') error: string,
+    @Res() response: Response,
+  ): Promise<void> {
+    try {
+      const parsedProvider = await this.oauthService.providerForState(state);
+      const redirectUrl = error
+        ? await this.oauthService.completeProviderError(
+            parsedProvider,
+            state,
+            error,
+          )
+        : await this.oauthService.completeCallback(parsedProvider, state, code);
+      response.redirect(redirectUrl);
+    } catch (exception) {
+      if (!(exception instanceof HttpException)) throw exception;
+      this.logger.warn(`OAuth callback failed: ${exception.message}`);
+      response.redirect(await this.oauthService.callbackFailureForState(state));
+    }
+  }
+
+  private parseOAuthProvider(provider: string): OAuthProvider {
+    const supportedProvider = OAUTH_PROVIDERS.find(
+      (candidate) => candidate === provider,
+    );
+    if (!supportedProvider) {
+      throw new BadRequestException('Unsupported OAuth provider');
+    }
+    return supportedProvider;
+  }
 
   @Post('challenge')
   @HttpCode(HttpStatus.OK)
