@@ -26,6 +26,10 @@ import { AccountModule } from './account/account.module';
 import { SavingsModule } from './savings/savings.module';
 import { ActivityModule } from './activity/activity.module';
 import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
+import { BackupModule } from './backup/backup.module';
+import { AnchorModule } from './anchor/anchor.module';
+import { CsvImportModule } from './csv-import/csv-import.module';
+import { GraphqlApiModule } from './graphql/graphql.module';
 
 @Module({
   imports: [
@@ -104,6 +108,10 @@ import { TieredThrottlerGuard } from './common/guards/tiered-throttler.guard';
     AccountModule,
     SavingsModule,
     ActivityModule,
+    BackupModule,
+    AnchorModule,
+    CsvImportModule,
+    GraphqlApiModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
